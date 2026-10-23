@@ -49,6 +49,9 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - Cyan box = tracking, amber = searching. Lost for 3 s → stops and tells you. Swipe or TRACK to stop.
 - Settings → Tracking response: lower = smoother, higher = faster.
 - Works best on objects with visible detail; thermal view is excellent for people / animals.
+- The target label shows the match score and the tracking frame rate (FPS).
+- ZT6: corrections are scaled automatically to the active lens (visible / thermal) and the zoom level,
+  so tracking behaves the same in thermal view and when zoomed in.
 
 ### Tap-to-aim (ZT6 only)
 - Double-tap any point of the video: the gimbal turns so that point becomes the centre.
@@ -59,6 +62,12 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - Actions: zoom in/out (hold), photo, record, presets, patrol, tracking, plus HOME / NIGHT / WIPE (SHJ)
   or CENTER / VIEW / PALETTE / MODE (ZT6).
 - Defaults: R1/L1 zoom, A record, X photo, Y home/centre, B night/palette, START patrol, SELECT tracking.
+
+### Video transport
+- "RTSP over TCP" (default, recommended for Skydroid / any radio link): lost packets are re-sent and the
+  RTSP session stays alive. UDP has slightly less delay but drops on lossy links.
+- If a live UDP stream drops twice within a minute, the app switches to TCP automatically and saves it.
+- Large 4K key frames (ZT6) get a 2 MB receive buffer so they are no longer truncated / corrupted.
 
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.

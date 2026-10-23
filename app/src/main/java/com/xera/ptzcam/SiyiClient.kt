@@ -2,10 +2,13 @@ package com.xera.ptzcam
 
 import android.os.SystemClock
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.Locale
 import kotlin.concurrent.thread
@@ -18,7 +21,11 @@ interface PtzMover {
 }
 
 /**
- * SIYI gimbal SDK over UDP (ZT6, ZT30, ZR10, A8 …). Default 192.168.144.25:37260.
+ * SIYI gimbal SDK over Ethernet (ZT6, ZT30, ZR10, A8 …). Default 192.168.144.25:37260.
+ * Two transports on the same port, as in SIYI's manual and the UniGCS / SIYI FPV apps:
+ *  - UDP: connectionless datagrams.
+ *  - TCP: byte stream; requires a heartbeat (CMD 0x00) at 1 Hz to keep the session alive.
+ *    Used automatically when UDP is not passed by the network (e.g. some radio links).
  *
  * Packet: 0x55 0x66 | CTRL | DATA_LEN (u16 LE) | SEQ (u16 LE) | CMD_ID | DATA | CRC16 (LE)
  * CRC16-CCITT (poly 0x1021, init 0) over everything before the CRC.
@@ -28,6 +35,13 @@ interface PtzMover {
 class SiyiClient(val host: String, val port: Int) : PtzMover {
 
     enum class Handshake { OK, NO_REPLY, BAD_REPLY }
+    enum class Transport { UDP, TCP }
+
+    var transport = Transport.UDP
+        private set
+
+    /** False once closed or once the TCP session has dropped (the caller should reconnect). */
+    val isOpen get() = running
 
     data class Attitude(val yaw: Float, val pitch: Float, val roll: Float)
 
@@ -68,13 +82,15 @@ class SiyiClient(val host: String, val port: Int) : PtzMover {
 
     private var socket: DatagramSocket? = null
     private var target: InetSocketAddress? = null
+    private var tcp: Socket? = null
+    private var tcpOut: OutputStream? = null
     @Volatile private var running = false
     private var seq = 0
     private var lastZoomDir = 0
 
     val modelName: String
         get() = when (hardwareId?.take(2)) {
-            "83" -> "ZT6"
+            "83", "82" -> "ZT6"
             "7A", "7a" -> "ZT30"
             "6B", "6b" -> "ZR10"
             "73" -> "A8 mini"
@@ -85,23 +101,49 @@ class SiyiClient(val host: String, val port: Int) : PtzMover {
 
     // ------------------------------------------------------------------ connection
 
-    fun open() {
+    /** Opens the control link. UDP is instant; TCP connects (≤ 3 s) and starts the 1 Hz heartbeat. */
+    fun open(mode: Transport = Transport.UDP) {
         close()
+        transport = mode
         val addr = InetSocketAddress(InetAddress.getByName(host), port)   // throws on an invalid address
-        // Deliberately NOT connect()ed: a connected UDP socket drops every reply whose source port
-        // differs from the destination port, and SIYI firmware may answer from another port.
-        val s = DatagramSocket()
-        s.soTimeout = 500
         target = addr
-        socket = s
         running = true
-        thread(name = "siyi-rx", isDaemon = true) { rxLoop(s) }
+        when (mode) {
+            Transport.UDP -> {
+                // Deliberately NOT connect()ed: a connected UDP socket drops every reply whose source
+                // port differs from the destination port, and SIYI firmware may answer from another port.
+                val s = DatagramSocket()
+                s.soTimeout = 500
+                socket = s
+                thread(name = "siyi-rx-udp", isDaemon = true) { rxLoopUdp(s) }
+            }
+            Transport.TCP -> {
+                val t = Socket()
+                t.tcpNoDelay = true
+                t.connect(addr, 3000)
+                t.soTimeout = 500
+                tcp = t
+                tcpOut = t.getOutputStream()
+                lastSource = "${addr.address.hostAddress}:$port"
+                val input = t.getInputStream()
+                thread(name = "siyi-rx-tcp", isDaemon = true) { rxLoopTcp(input) }
+                thread(name = "siyi-heartbeat", isDaemon = true) {
+                    while (running) {
+                        runCatching { send(CMD_HEARTBEAT, byteArrayOf(0)) }
+                        Thread.sleep(1000)
+                    }
+                }
+            }
+        }
     }
 
     fun close() {
         running = false
         socket?.close()
         socket = null
+        runCatching { tcp?.close() }
+        tcp = null
+        tcpOut = null
     }
 
     /**
@@ -188,7 +230,6 @@ class SiyiClient(val host: String, val port: Int) : PtzMover {
 
     @Synchronized
     private fun send(cmd: Int, data: ByteArray = ByteArray(0)) {
-        val s = socket ?: throw IOException("gimbal not connected")
         val len = data.size
         val buf = ByteArray(10 + len)
         buf[0] = 0x55
@@ -204,13 +245,23 @@ class SiyiClient(val host: String, val port: Int) : PtzMover {
         val crc = crc16(buf, 8 + len)
         buf[8 + len] = (crc and 0xFF).toByte()
         buf[9 + len] = ((crc shr 8) and 0xFF).toByte()
-        s.send(DatagramPacket(buf, buf.size, target ?: throw IOException("gimbal not connected")))
-        if (cmd != CMD_ATTITUDE && cmd != CMD_ROTATION) {
+        when (transport) {
+            Transport.UDP -> {
+                val s = socket ?: throw IOException("gimbal not connected")
+                s.send(DatagramPacket(buf, buf.size, target ?: throw IOException("gimbal not connected")))
+            }
+            Transport.TCP -> {
+                val out = tcpOut ?: throw IOException("gimbal not connected")
+                out.write(buf)
+                out.flush()
+            }
+        }
+        if (cmd != CMD_ATTITUDE && cmd != CMD_ROTATION && cmd != CMD_HEARTBEAT) {
             onDebug?.invoke("TX " + hex(buf, buf.size))
         }
     }
 
-    private fun rxLoop(s: DatagramSocket) {
+    private fun rxLoopUdp(s: DatagramSocket) {
         val buf = ByteArray(1024)
         while (running) {
             try {
@@ -228,6 +279,60 @@ class SiyiClient(val host: String, val port: Int) : PtzMover {
                 if (!running) break
             }
         }
+    }
+
+    /** TCP is a byte stream: packets can arrive split or merged, so bytes are reassembled here. */
+    private fun rxLoopTcp(input: InputStream) {
+        val chunk = ByteArray(1024)
+        var acc = ByteArray(4096)
+        var len = 0
+        while (running) {
+            val n = try {
+                input.read(chunk)
+            } catch (_: SocketTimeoutException) {
+                continue
+            } catch (e: Exception) {
+                if (running) onDebug?.invoke("TCP link closed: ${e.message}")
+                break
+            }
+            if (n < 0) {
+                if (running) onDebug?.invoke("TCP link closed by the gimbal")
+                break
+            }
+            rawPackets++
+            if (len + n > acc.size) acc = acc.copyOf(maxOf(acc.size * 2, len + n))
+            System.arraycopy(chunk, 0, acc, len, n)
+            len += n
+            val used = consumeStream(acc, len)
+            if (used > 0) {
+                System.arraycopy(acc, used, acc, 0, len - used)
+                len -= used
+            }
+            if (len > 65536) len = 0                          // garbage protection
+        }
+        running = false
+    }
+
+    /** Parses complete packets from [b] (stream mode); returns how many bytes were consumed. */
+    private fun consumeStream(b: ByteArray, n: Int): Int {
+        var i = 0
+        while (i + 10 <= n) {
+            if (b[i] != 0x55.toByte() || b[i + 1] != 0x66.toByte()) { i++; continue }
+            val dataLen = u8(b, i + 3) or (u8(b, i + 4) shl 8)
+            if (dataLen > 1024) { i++; continue }             // not a real header
+            val total = 10 + dataLen
+            if (i + total > n) return i                      // wait for the rest of this packet
+            val crc = u8(b, i + 8 + dataLen) or (u8(b, i + 9 + dataLen) shl 8)
+            if (crc == crc16(b.copyOfRange(i, i + 8 + dataLen), 8 + dataLen)) {
+                handle(u8(b, i + 7), b, i + 8, dataLen)
+                i += total
+            } else {
+                badPackets++
+                i++                                          // resynchronise on the next header
+            }
+        }
+        // keep a possible partial header at the end
+        return if (n - i < 10) i else n
     }
 
     /** Returns true if the datagram contained at least one valid SIYI packet. */
@@ -304,6 +409,7 @@ class SiyiClient(val host: String, val port: Int) : PtzMover {
     companion object {
         const val DEFAULT_PORT = 37260
 
+        private const val CMD_HEARTBEAT = 0x00
         private const val CMD_HARDWARE_ID = 0x02
         private const val CMD_MANUAL_ZOOM = 0x05
         private const val CMD_ROTATION = 0x07

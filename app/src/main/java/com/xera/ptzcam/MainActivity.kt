@@ -240,7 +240,7 @@ class MainActivity : AppCompatActivity() {
         tracking = TrackingController(
             lifecycleScope, ptz,
             grabFrame = { w -> grabVideoFrame(w) },
-            zoom = { siyi?.zoomX ?: 1f },
+            angleScale = { trackingAngleScale() },
             listener = trackListener,
         )
         patrol = PatrolRunner(
@@ -644,19 +644,28 @@ class MainActivity : AppCompatActivity() {
                 var connected: SiyiClient? = null
                 var result = SiyiClient.Handshake.NO_REPLY
                 var invalidHost = false
-                for (h in hosts) {
-                    val c = SiyiClient(h, s.port)
-                    c.onFeedback = { msg -> runOnUiThread { hudMessage(msg) } }
-                    c.onDebug = { line -> runOnUiThread { addDebug(line) } }
-                    val r = withContext(Dispatchers.IO) {
-                        runCatching { c.open(); c.handshake() }.getOrElse {
-                            if (h == s.host) invalidHost = true
-                            SiyiClient.Handshake.NO_REPLY
+                // Like UniGCS / SIYI FPV: SIYI SDK over UDP first, then over TCP on the same port
+                // (TCP gets through networks / radio links that do not pass the gimbal's UDP).
+                // the control port is always 37260 on SIYI gimbals; try it if a different port was entered
+                val ports = listOf(s.port, SiyiClient.DEFAULT_PORT).distinct()
+                search@ for (h in hosts) for (port in ports) {
+                    for (mode in SiyiClient.Transport.values()) {
+                        setStep(Step.LINK, StepState.ACTIVE, "${mode.name} $h:$port")
+                        val c = SiyiClient(h, port)
+                        c.onFeedback = { msg -> runOnUiThread { hudMessage(msg) } }
+                        c.onDebug = { line -> runOnUiThread { addDebug(line) } }
+                        val r = withContext(Dispatchers.IO) {
+                            runCatching { c.open(mode); c.handshake() }.getOrElse { e ->
+                                if (e is java.net.UnknownHostException && h == s.host) invalidHost = true
+                                addDebugAsync("${mode.name} $h: ${e.message}")
+                                SiyiClient.Handshake.NO_REPLY
+                            }
                         }
+                        if (r == SiyiClient.Handshake.OK) { connected = c; break@search }
+                        withContext(Dispatchers.IO) { c.close() }
+                        if (r == SiyiClient.Handshake.BAD_REPLY) result = r
+                        if (invalidHost) break@search
                     }
-                    if (r == SiyiClient.Handshake.OK) { connected = c; break }
-                    withContext(Dispatchers.IO) { c.close() }
-                    if (r == SiyiClient.Handshake.BAD_REPLY) result = r
                 }
 
                 if (connected == null) {
@@ -664,7 +673,7 @@ class MainActivity : AppCompatActivity() {
                         invalidHost -> "Gimbal IP “${s.host}” is not a valid address – fix it in Settings"
                         result == SiyiClient.Handshake.BAD_REPLY ->
                             "Gimbal answers but the replies are unreadable – turn on Settings → Gimbal debug and send a screenshot"
-                        else -> "Gimbal control not answering on ${s.host}:${s.port} (UDP). " +
+                        else -> "Gimbal control not answering on ${s.host}:${s.port} (tried UDP and TCP). " +
                             "Video works separately – check the gimbal IP / port in Settings"
                     }
                     siyiError = msg
@@ -676,19 +685,22 @@ class MainActivity : AppCompatActivity() {
                     continue
                 }
 
-                if (connected.host != s.host) {
-                    // found via the video URL: remember the working address
-                    settings = s.copy(host = connected.host)
+                if (connected.host != s.host || connected.port != s.port) {
+                    // found via the video URL / standard port: remember the working address
+                    settings = s.copy(host = connected.host, port = connected.port)
                     settings.save(prefs)
-                    hudMessage("Gimbal found at ${connected.host} (video address) – saved")
+                    hudMessage("Gimbal control found at ${connected.host}:${connected.port} – saved")
                 }
                 siyi = connected
                 siyiError = null
                 ptz.client = connected
                 setControlBadge(true)
                 setStep(Step.LINK, StepState.OK, connected.host)
-                setStep(Step.ONVIF, StepState.OK, "${connected.modelName} ready")
-                if (attempt > 1) hudMessage("Gimbal control connected")
+                setStep(Step.ONVIF, StepState.OK, "${connected.modelName} ready (${connected.transport.name})")
+                addDebug("Control link: ${connected.transport.name} ${connected.host}:${connected.port}")
+                if (attempt > 1 || connected.transport == SiyiClient.Transport.TCP) {
+                    hudMessage("Gimbal control connected (${connected.transport.name})")
+                }
                 if (!isLive) setStep(Step.VIDEO, StepState.ACTIVE, "Opening stream…")
                 if (!playerStarted) playStream()
                 startSiyiPolling(connected)
@@ -715,18 +727,31 @@ class MainActivity : AppCompatActivity() {
         hudMessage("Testing gimbal control at $host:$port …")
         lifecycleScope.launch {
             val c = SiyiClient(host, port)
-            val r = withContext(Dispatchers.IO) {
-                val res = runCatching { c.open(); c.handshake(3000) }.getOrDefault(SiyiClient.Handshake.NO_REPLY)
+            val udp = withContext(Dispatchers.IO) {
+                val res = runCatching { c.open(SiyiClient.Transport.UDP); c.handshake(3000) }
+                    .getOrDefault(SiyiClient.Handshake.NO_REPLY)
                 c.close()
                 res
             }
-            when (r) {
-                SiyiClient.Handshake.OK ->
-                    hudMessage("✓ ${c.modelName} answered from ${c.lastSource ?: host} – control link OK")
+            if (udp == SiyiClient.Handshake.OK) {
+                return@launch hudMessage("✓ ${c.modelName} answered over UDP from ${c.lastSource ?: host} – control OK")
+            }
+            val t = SiyiClient(host, port)
+            val tcp = withContext(Dispatchers.IO) {
+                val res = runCatching { t.open(SiyiClient.Transport.TCP); t.handshake(3000) }
+                    .getOrElse { e -> addDebugAsync("TCP test: ${e.message}"); SiyiClient.Handshake.NO_REPLY }
+                t.close()
+                res
+            }
+            if (tcp == SiyiClient.Handshake.OK) {
+                return@launch hudMessage("✓ ${t.modelName} answered over TCP (UDP is blocked on this network) – control OK")
+            }
+            when (udp) {
+                SiyiClient.Handshake.OK -> Unit
                 SiyiClient.Handshake.BAD_REPLY ->
                     hudMessage("Answered from ${c.lastSource} but ${c.badPackets} replies were unreadable", error = true)
                 SiyiClient.Handshake.NO_REPLY ->
-                    hudMessage("No reply from $host:$port – check the IP, cable and that UDP $port is the SDK port", error = true)
+                    hudMessage("No reply from $host:$port over UDP or TCP – check the IP, cable and port", error = true)
             }
         }
     }
@@ -746,7 +771,22 @@ class MainActivity : AppCompatActivity() {
         siyiJob?.cancel()
         siyiJob = lifecycleScope.launch {
             var tick = 0
+            var badge: Boolean? = true
             while (isActive) {
+                if (!c.isOpen) {                                   // TCP session dropped
+                    siyiError = "Gimbal control link lost – reconnecting…"
+                    hudMessage(siyiError!!, error = true)
+                    setControlBadge(false)
+                    closeSiyi()
+                    connectSiyi()
+                    return@launch
+                }
+                val healthy = SystemClock.elapsedRealtime() - c.lastRxTime < 5000
+                if (healthy != badge) {
+                    badge = healthy
+                    setControlBadge(healthy)
+                    siyiError = if (healthy) null else "Gimbal is not answering – check the link"
+                }
                 withContext(Dispatchers.IO) {
                     runCatching {
                         c.requestAttitude()
@@ -814,6 +854,8 @@ class MainActivity : AppCompatActivity() {
         railMode?.setLabel(MODE_LABELS[next])
         siyiCmd("Gimbal mode: ${MODE_NAMES[next]}") { it.setMotionMode(next) }
     }
+
+    private fun addDebugAsync(line: String) = runOnUiThread { addDebug(line) }
 
     private fun addDebug(line: String) {
         if (!settings.debug) return
@@ -979,7 +1021,7 @@ class MainActivity : AppCompatActivity() {
     // ---------------- active tracking (both cameras)
 
     private val trackListener = object : TrackingController.Listener {
-        override fun onTrackBox(box: RectF?, searching: Boolean, score: Float) {
+        override fun onTrackBox(box: RectF?, searching: Boolean, score: Float, fps: Float) {
             if (box == null) {
                 trackOverlay.showTarget(null)
                 return
@@ -990,7 +1032,10 @@ class MainActivity : AppCompatActivity() {
                 vr.left + box.right * vr.width(), vr.top + box.bottom * vr.height(),
             )
             if (searching) trackOverlay.showTarget(r, TrackOverlayView.State.SEARCHING, "SEARCHING…")
-            else trackOverlay.showTarget(r, TrackOverlayView.State.TRACKING, "TRACKING  ${(score * 100).roundToInt()}%")
+            else trackOverlay.showTarget(
+                r, TrackOverlayView.State.TRACKING,
+                "TRACKING  ${(score * 100).roundToInt()}%  ·  ${fps.roundToInt()} FPS",
+            )
         }
 
         override fun onTrackEnded(message: String) {
@@ -998,6 +1043,17 @@ class MainActivity : AppCompatActivity() {
             hudMessage(message, error = bad)
             updateModeUi()
         }
+    }
+
+    /**
+     * Real angle covered by the screen relative to the visible camera at 1× (see TrackingController).
+     * ZT6: thermal lens and zoom are known. SHJ: no field-of-view data → 1 (use Tracking response).
+     */
+    private fun trackingAngleScale(): Float {
+        if (!settings.isSiyi) return 1f
+        val fov = if (viewIndex == 1) settings.fovThermal else settings.fovRgb
+        val zoomX = (siyi?.zoomX ?: 1f).coerceAtLeast(1f)
+        return (fov / settings.fovRgb.coerceAtLeast(1f)) / zoomX
     }
 
     private fun toggleTracking() {
@@ -1419,6 +1475,9 @@ class MainActivity : AppCompatActivity() {
             setHWDecoderEnabled(true, false)
             addOption(":network-caching=${settings.cachingMs}")
             if (settings.rtspTcp) addOption(":rtsp-tcp")
+            // live555's default 250 kB frame buffer truncates large 4K key frames (ZT6), which
+            // corrupts the picture until the next key frame – give it room for 2 MB frames
+            addOption(":rtsp-frame-buffer-size=$RTSP_FRAME_BUFFER")
             if (!url.contains("@") && settings.user.isNotBlank()) {
                 addOption(":rtsp-user=${settings.user}")
                 addOption(":rtsp-pwd=${settings.pass}")
@@ -1454,6 +1513,30 @@ class MainActivity : AppCompatActivity() {
 
     private val retry = Runnable { if (wantPlaying) playStream() }
 
+    /** Times (ms) at which a live UDP video stream dropped, within the last minute. */
+    private val udpDrops = ArrayDeque<Long>()
+
+    /**
+     * Called when a live stream drops. Over UDP, a lost packet is never re-sent, so a lossy link
+     * (radio, weak Wi-Fi) keeps breaking the picture. After [UDP_DROP_LIMIT] drops within
+     * [UDP_DROP_WINDOW_MS], switch the video to TCP (re-sent packets, session kept alive), save
+     * that choice, and restart immediately. Returns true if it restarted the stream itself.
+     */
+    private fun noteVideoDrop(): Boolean {
+        if (settings.rtspTcp) return false
+        val now = SystemClock.elapsedRealtime()
+        udpDrops.addLast(now)
+        while (udpDrops.isNotEmpty() && now - udpDrops.first() > UDP_DROP_WINDOW_MS) udpDrops.removeFirst()
+        if (udpDrops.size < UDP_DROP_LIMIT) return false
+        udpDrops.clear()
+        settings = settings.copy(rtspTcp = true)
+        settings.save(prefs)
+        hudMessage("Video kept dropping over UDP – switched to TCP automatically (Settings → Video)", error = true)
+        ui.removeCallbacks(retry)
+        if (wantPlaying) playStream()
+        return true
+    }
+
     private fun onPlayerEvent(type: Int) {
         when (type) {
             MediaPlayer.Event.Playing -> {
@@ -1463,9 +1546,10 @@ class MainActivity : AppCompatActivity() {
                 ui.postDelayed({ if (isLive) hideConnectScreen() }, 700)
             }
             MediaPlayer.Event.EncounteredError, MediaPlayer.Event.EndReached -> {
+                val wasLive = isLive
                 isLive = false
                 setStep(Step.VIDEO, StepState.FAIL, "Stream error – retrying…")
-                if (wantPlaying) {
+                if (wantPlaying && !(wasLive && noteVideoDrop())) {
                     ui.removeCallbacks(retry)
                     ui.postDelayed(retry, 2000)
                 }
@@ -1492,10 +1576,12 @@ class MainActivity : AppCompatActivity() {
                 if (zeroTicks >= STALL_TICKS) {
                     zeroTicks = 0
                     isLive = false
-                    hudMessage("Video stalled – reconnecting…", error = true)
-                    player.stop()
-                    ui.removeCallbacks(retry)
-                    ui.postDelayed(retry, 500)
+                    if (!noteVideoDrop()) {
+                        hudMessage("Video stalled – reconnecting…", error = true)
+                        player.stop()
+                        ui.removeCallbacks(retry)
+                        ui.postDelayed(retry, 500)
+                    }
                 }
             } else {
                 kbps = 0
@@ -2088,6 +2174,11 @@ class MainActivity : AppCompatActivity() {
         if (formFovThermal != null &&
             !validate(formFovThermal, fovThermal != null && fovThermal in 5f..170f, "Field of view must be 5 – 170°")
         ) return
+        if (siyiModel) {
+            val videoPort = Regex(":(\\d+)/").find(formRtsp?.text?.toString().orEmpty())?.groupValues?.get(1)?.toIntOrNull()
+            if (!validate(formPort, port != videoPort,
+                    "$port is the VIDEO port – the gimbal control port is ${SiyiClient.DEFAULT_PORT}")) return
+        }
         val patrolNames = PATROL_ORDER.filter { formPatrolChecks[it]?.isChecked == true }
 
         settings = CamSettings(
@@ -2358,6 +2449,9 @@ class MainActivity : AppCompatActivity() {
         private const val MIN_VIDEO_BYTES = 50_000L
         private const val AUTO_HIDE_MS = 4000L
         private const val STALL_TICKS = 6
+        private const val RTSP_FRAME_BUFFER = 2_000_000
+        private const val UDP_DROP_LIMIT = 2
+        private const val UDP_DROP_WINDOW_MS = 60_000L
         private const val SHJ_TRAVEL_MS = 3000L        // SHJ preset travel allowance during patrol
         private const val PITCH_MIN = -90f             // ZT6 controllable pitch range
         private const val PITCH_MAX = 25f

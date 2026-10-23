@@ -13,7 +13,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.sqrt
 
 /**
  * Active tracking by visual servoing: grabs the displayed video frame ~12×/s, follows the
@@ -27,13 +26,17 @@ class TrackingController(
     private val ptz: PtzController,
     /** Current video frame scaled to the given width (main thread), or null if unavailable. */
     private val grabFrame: suspend (Int) -> Bitmap?,
-    /** Current zoom magnification (1 = wide); larger zoom → gentler corrections. */
-    private val zoom: () -> Float,
+    /**
+     * How large one screen-width of error is in real angle, relative to the reference view
+     * (visible camera at 1×). Narrower view (thermal lens, zoom) → smaller → gentler corrections.
+     * Example: thermal 32.8° vs visible 84.5° → 0.39; visible at 4× zoom → 0.25.
+     */
+    private val angleScale: () -> Float,
     private val listener: Listener,
 ) {
     interface Listener {
         /** Box in normalised video coordinates (0..1), or null to clear. */
-        fun onTrackBox(box: RectF?, searching: Boolean, score: Float)
+        fun onTrackBox(box: RectF?, searching: Boolean, score: Float, fps: Float)
         fun onTrackEnded(message: String)
     }
 
@@ -81,6 +84,8 @@ class TrackingController(
                 var iTilt = 0f
                 var weak = 0
                 var lostSince = 0L
+                var fps = 0f
+                var lastFrameAt = 0L
                 while (isActive) {
                     val t0 = SystemClock.elapsedRealtime()
                     if (ptz.manualActive) { reason = "Tracking stopped (manual control)"; break }
@@ -116,7 +121,9 @@ class TrackingController(
                         // error of the target centre from the frame centre, -1..1
                         val ex = (box.cx / w - 0.5f) * 2f
                         val ey = (box.cy / h - 0.5f) * 2f
-                        val z = sqrt(max(1f, zoom()))
+                        // corrections scale with the real angle the screen covers (v3.1 used only
+                        // sqrt(zoom) and ignored the narrower thermal lens → hunting in thermal / zoom)
+                        val z = 1f / angleScale().coerceIn(0.02f, 2f)
                         val dt = FRAME_MS / 1000f
                         if (abs(ex) >= DEAD_BAND) iPan = (iPan + ex * dt).coerceIn(-I_LIMIT, I_LIMIT)
                         if (abs(ey) >= DEAD_BAND) iTilt = (iTilt + ey * dt).coerceIn(-I_LIMIT, I_LIMIT)
@@ -129,9 +136,14 @@ class TrackingController(
                         ptz.autoPan = smPan
                         ptz.autoTilt = smTilt
                     }
+                    if (lastFrameAt != 0L) {
+                        val inst = 1000f / max(1L, now - lastFrameAt)
+                        fps = if (fps == 0f) inst else fps * 0.8f + inst * 0.2f
+                    }
+                    lastFrameAt = now
                     listener.onTrackBox(
                         RectF(box.x / w, box.y / h, (box.x + box.w) / w, (box.y + box.h) / h),
-                        lostSince != 0L, box.score,
+                        lostSince != 0L, box.score, fps,
                     )
                     val spent = SystemClock.elapsedRealtime() - t0
                     delay(max(0L, FRAME_MS - spent))
@@ -141,7 +153,7 @@ class TrackingController(
                 ptz.autoTilt = 0f
                 if (job === me) {
                     job = null
-                    listener.onTrackBox(null, false, 0f)
+                    listener.onTrackBox(null, false, 0f, 0f)
                     listener.onTrackEnded(reason)
                 }
             }
