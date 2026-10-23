@@ -41,6 +41,10 @@ class PtzController(
     @Volatile var rockerZoom = 0f
     @Volatile var maxSpeed = 1f
 
+    /** True while pan/tilt commands are being sent (used to detect cameras that never report position). */
+    @Volatile var isMoving = false
+        private set
+
     private var job: Job? = null
 
     fun start() {
@@ -69,6 +73,7 @@ class PtzController(
                         if (moving) {
                             c.stop()
                             moving = false
+                            isMoving = false
                             last = floatArrayOf(0f, 0f, 0f)
                         }
                     } else {
@@ -79,6 +84,7 @@ class PtzController(
                         if ((changed || !moving || keepAlive) && now - lastSend >= 60) {
                             c.continuousMove(pan, tilt, zoom)
                             moving = true
+                            isMoving = pan != 0f || tilt != 0f
                             last = floatArrayOf(pan, tilt, zoom)
                             lastSend = now
                         }

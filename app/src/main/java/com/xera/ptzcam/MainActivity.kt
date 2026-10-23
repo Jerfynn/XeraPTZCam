@@ -136,7 +136,6 @@ class MainActivity : AppCompatActivity() {
 
     /** Camera IR-cut state: "ON" = day, "OFF" = night, "AUTO", null = unknown. */
     private var irCut: String? = null
-    private var lastPanDeg: Float? = null
     private var controlsShown = true
 
     private val fontBold by lazy { ResourcesCompat.getFont(this, R.font.rajdhani_bold) }
@@ -182,10 +181,6 @@ class MainActivity : AppCompatActivity() {
         setupPresetDial()
         setupSettingsSheet()
         setupConnectScreen()
-
-        hud.insetLeft = 80 * dp
-        hud.insetRight = 86 * dp
-        hud.insetTop = 54 * dp
 
         updateNightUi()
         updateLinkUi()
@@ -462,11 +457,7 @@ class MainActivity : AppCompatActivity() {
         return c
     }
 
-    // ------------------------------------------------------------------ position → HUD
-
-    private var frontPanDeg: Float
-        get() = prefs.getFloat("frontPan", 0f)
-        set(v) { prefs.edit().putFloat("frontPan", v).apply() }
+    // ------------------------------------------------------------------ zoom readout
 
     private fun startStatusPolling(c: OnvifClient) {
         statusJob?.cancel()
@@ -486,12 +477,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyStatus(st: PtzStatus) {
-        st.pan?.let { p ->
-            val deg = p * 180f
-            lastPanDeg = deg
-            hud.heading = ((deg - frontPanDeg) % 360f + 360f) % 360f
-        }
-        st.tilt?.let { hud.tilt = it * 90f }
         st.zoom?.let { z ->
             val mag = 1f + z.coerceIn(0f, 1f) * (settings.maxZoom - 1)
             zoomText.text = String.format(Locale.US, "%.1f×", mag)
@@ -588,14 +573,12 @@ class MainActivity : AppCompatActivity() {
     private fun saveNamedPreset(name: String) {
         val c = client() ?: return
         val token = presetToken(name) ?: DEFAULT_PRESET_TOKEN[name] ?: "20"
-        val panNow = lastPanDeg
         lifecycleScope.launch {
             val r = withContext(Dispatchers.IO) {
                 runCatching { c.setPreset(token, name) }.recoverCatching { c.setPreset(null, name) }
             }
             r.onSuccess {
                 prefs.edit().putString("preset_$name", it).apply()
-                if (name == "FRONT" && panNow != null) frontPanDeg = panNow   // compass "F" = this direction
                 presetDial.saved = savedPresets()
                 hudMessage("$name saved")
             }.onFailure { hudMessage("Could not save $name: ${it.message}", error = true) }
@@ -1126,23 +1109,6 @@ class MainActivity : AppCompatActivity() {
         speedLabel.text = "Max pan / tilt speed · ${formSpeed!!.progress.coerceAtLeast(10)} %"
         settingsContent.addView(formSpeed)
         formZoom = field("Camera optical zoom (×) – for the zoom readout", s.maxZoom.toString(), InputType.TYPE_CLASS_NUMBER)
-        val frontBtn = Button(this).apply {
-            text = "SET CURRENT DIRECTION AS FRONT"
-            typeface = fontBold
-            letterSpacing = 0.06f
-            textSize = 12f
-            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
-            setBackgroundResource(R.drawable.btn_secondary)
-            stateListAnimator = null
-            setOnClickListener {
-                val p = lastPanDeg
-                if (p == null) hudMessage("Camera position not available", error = true)
-                else { frontPanDeg = p; hudMessage("Compass FRONT set") }
-            }
-        }
-        settingsContent.addView(frontBtn, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, (42 * dp).toInt()
-        ).apply { topMargin = (12 * dp).toInt() })
 
         section("WIPER")
         formWiper = field("Wiper preset number (only if WIPE doesn't work)", s.wiperPreset, InputType.TYPE_CLASS_NUMBER)
@@ -1237,8 +1203,6 @@ class MainActivity : AppCompatActivity() {
         ptz.client = null
         onvifRtsp = null
         irCut = null
-        hud.heading = null
-        hud.tilt = null
         updateNightUi()
         showConnectScreen()
         connectOnvif()

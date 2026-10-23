@@ -21,6 +21,13 @@ class OnvifException(message: String) : Exception(message)
 /** Camera position in ONVIF generic space: pan/tilt -1..1, zoom 0..1 (null if not reported). */
 data class PtzStatus(val pan: Float?, val tilt: Float?, val zoom: Float?)
 
+/** Absolute position ranges reported by the camera (GetNodes). Null fields = not reported. */
+data class PtzRanges(
+    val panMin: Float?, val panMax: Float?,
+    val tiltMin: Float?, val tiltMax: Float?,
+    val zoomMin: Float?, val zoomMax: Float?,
+)
+
 /**
  * Minimal ONVIF client: service discovery, RTSP URI, PTZ moves, presets, home position,
  * night mode (IR-cut filter + IR lamp) and JPEG snapshots.
@@ -54,6 +61,10 @@ class OnvifClient(
     var auxCommands: List<String> = emptyList()
         private set
 
+    /** Position ranges of the PTZ node (used to convert status values to degrees). */
+    var ranges: PtzRanges? = null
+        private set
+
     /** Connects and returns the RTSP URI of the first profile (null if the camera gives none). */
     fun connect(): String? {
         syncClock()
@@ -73,13 +84,14 @@ class OnvifClient(
         videoSourceToken = Regex("<(?:\\w+:)?SourceToken>([^<]+)<")
             .find(profiles)?.groupValues?.get(1)?.trim()
 
-        auxCommands = try {
-            val nodes = soap(ptzUrl, "<tptz:GetNodes xmlns:tptz=\"$NS_PTZ\"/>")
-            Regex("<(?:\\w+:)?AuxiliaryCommands>([^<]+)<").findAll(nodes)
-                .map { it.groupValues[1].trim() }.filter { it.isNotEmpty() }.distinct().toList()
+        val nodes = try {
+            soap(ptzUrl, "<tptz:GetNodes xmlns:tptz=\"$NS_PTZ\"/>")
         } catch (e: Exception) {
-            emptyList()
+            ""
         }
+        auxCommands = Regex("<(?:\\w+:)?AuxiliaryCommands>([^<]+)<").findAll(nodes)
+            .map { it.groupValues[1].trim() }.filter { it.isNotEmpty() }.distinct().toList()
+        ranges = parseRanges(nodes)
 
         return try {
             val r = soap(
@@ -333,6 +345,23 @@ class OnvifClient(
     private fun md5(s: String): String =
         MessageDigest.getInstance("MD5").digest(s.toByteArray(Charsets.UTF_8))
             .joinToString("") { String.format(Locale.US, "%02x", it) }
+
+    private fun parseRanges(nodes: String): PtzRanges? {
+        if (nodes.isEmpty()) return null
+        fun range(block: String, axis: String): Pair<Float?, Float?> {
+            val m = Regex(
+                "<(?:\\w+:)?$axis>\\s*<(?:\\w+:)?Min>\\s*([-+0-9.eE]+)\\s*</(?:\\w+:)?Min>\\s*" +
+                    "<(?:\\w+:)?Max>\\s*([-+0-9.eE]+)\\s*<"
+            ).find(block) ?: return null to null
+            return m.groupValues[1].toFloatOrNull() to m.groupValues[2].toFloatOrNull()
+        }
+        val pt = nodes.substringAfter("AbsolutePanTiltPositionSpace", "")
+        val zm = nodes.substringAfter("AbsoluteZoomPositionSpace", "")
+        val (pMin, pMax) = range(pt, "XRange")
+        val (tMin, tMax) = range(pt, "YRange")
+        val (zMin, zMax) = range(zm, "XRange")
+        return PtzRanges(pMin, pMax, tMin, tMax, zMin, zMax)
+    }
 
     private fun findUri(xml: String): String? =
         Regex("<(?:\\w+:)?Uri>([^<]+)</").find(xml)?.groupValues?.get(1)

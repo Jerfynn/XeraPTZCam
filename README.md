@@ -31,8 +31,7 @@ Recommended for a 30 km radio link (Video/Audio page):
 
 - Connect screen: LINK → ONVIF → VIDEO checks; disappears when video is live (SKIP / SETTINGS available).
 - Video is full-screen. Tap the video to show / hide the controls; they auto-hide after 4 s.
-- HUD: centre crosshair, compass tape (F / R / B / L relative to the vehicle front), tilt scale,
-  zoom readout. Saving the FRONT preset (or Settings → "Set current direction as FRONT") aligns the compass.
+- HUD: centre crosshair and zoom readout.
 - Status strip: link quality (green / amber / red), bitrate, REC timer, IR badge, battery, clock.
 - Swipe on the video = pan/tilt (further = faster, flick = burst). Pinch or the left ZOOM rocker = zoom.
 - Right rail: PRESETS (compass dial – tap = go, hold = save), NIGHT (hold = AUTO), WIPE, PHOTO, REC,
