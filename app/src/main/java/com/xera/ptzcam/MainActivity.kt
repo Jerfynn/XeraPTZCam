@@ -9,12 +9,14 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
@@ -54,6 +56,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
@@ -66,7 +69,11 @@ import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.coroutines.resume
 import kotlin.math.abs
+import kotlin.math.atan
+import kotlin.math.roundToInt
+import kotlin.math.tan
 
 class MainActivity : AppCompatActivity() {
 
@@ -155,6 +162,25 @@ class MainActivity : AppCompatActivity() {
     private var streamIndex = 0        // ZT6: 0 = first RTSP stream, 1 = second
     private val debugLines = ArrayDeque<String>()
 
+    // tracking · patrol · tap-to-aim · button mapping
+    private lateinit var trackOverlay: TrackOverlayView
+    private lateinit var modeChip: TextView
+    private lateinit var btnPatrol: Button
+    private lateinit var patrolSummary: TextView
+    private lateinit var toolGallery: View
+    private lateinit var toolSettings: View
+    private lateinit var tracking: TrackingController
+    private lateinit var patrol: PatrolRunner
+    private var railTrack: RailButton? = null
+    private var patrolStep = ""
+    private var keyMap: MutableMap<Int, CamAction> = mutableMapOf()
+    private val heldKeys = HashMap<Int, CamAction>()
+    private var captureAction: CamAction? = null
+    private val clockFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private var batteryTick = 0
+    private val copyThread = HandlerThread("frame-copy").apply { start() }
+    private val copyHandler by lazy { Handler(copyThread.looper) }
+
     /** Camera IR-cut state: "ON" = day, "OFF" = night, "AUTO", null = unknown. */
     private var irCut: String? = null
     private var controlsShown = true
@@ -198,6 +224,33 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<ZoomRockerView>(R.id.zoomRocker).onChange = { v -> ptz.rockerZoom = v }
 
+        // tap-to-aim (ZT6) and target selection for tracking
+        swipePad.onDoubleTap = { x, y -> aimAtPoint(x, y) }
+        swipePad.onSelecting = { r -> trackOverlay.showSelection(r) }
+        swipePad.onSelected = { r -> startTrackingAt(r) }
+
+        toolGallery.setOnClickListener {
+            it.tick()
+            startActivity(Intent(this, GalleryActivity::class.java))
+        }
+        toolSettings.setOnClickListener { it.tick(); openSettings() }
+        modeChip.setOnClickListener { it.tick(); stopAutoModes(announce = true) }
+        btnPatrol.setOnClickListener { it.tick(); togglePatrol() }
+
+        tracking = TrackingController(
+            lifecycleScope, ptz,
+            grabFrame = { w -> grabVideoFrame(w) },
+            zoom = { siyi?.zoomX ?: 1f },
+            listener = trackListener,
+        )
+        patrol = PatrolRunner(
+            lifecycleScope,
+            goTo = { name -> patrolGoTo(name) },
+            shouldAbort = { ptz.manualActive },
+            onStep = { name -> patrolStep = name; updateModeUi() },
+            onFinished = { reason -> onPatrolFinished(reason) },
+        )
+
         buildRail()
         setupPresetDial()
         setupSettingsSheet()
@@ -223,6 +276,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
+        stopAutoModes(announce = false)
+        endCapture()
+        heldKeys.clear()
         if (recording) stopRecording(restartStream = false)
         if (wiperOn) setWiper(false)
         ui.removeCallbacks(statsTicker)
@@ -244,6 +300,7 @@ class MainActivity : AppCompatActivity() {
         player.setEventListener(null)
         player.release()
         libVlc.release()
+        copyThread.quitSafely()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -251,10 +308,12 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus) hideSystemBars()
     }
 
-    @Suppress("DEPRECATION")
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun onBackPressed() {
         when {
+            captureAction != null -> endCapture()
             settingsOverlay.visibility == View.VISIBLE -> closeSettings()
+            swipePad.selectMode -> cancelSelect()
             presetOverlay.visibility == View.VISIBLE -> closePresets()
             else -> super.onBackPressed()
         }
@@ -282,6 +341,12 @@ class MainActivity : AppCompatActivity() {
         modelText = findViewById(R.id.modelText)
         tempText = findViewById(R.id.tempText)
         debugText = findViewById(R.id.debugText)
+        trackOverlay = findViewById(R.id.trackOverlay)
+        modeChip = findViewById(R.id.modeChip)
+        btnPatrol = findViewById(R.id.btnPatrol)
+        patrolSummary = findViewById(R.id.patrolSummary)
+        toolGallery = findViewById(R.id.btnGallery)
+        toolSettings = findViewById(R.id.btnSettings)
         rail = findViewById(R.id.rail)
         zoomGroup = findViewById(R.id.zoomGroup)
         zoomText = findViewById(R.id.zoomText)
@@ -297,8 +362,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildRail() {
         rail.removeAllViews()
-        railNight = null; railWipe = null; railView = null; railPalette = null; railMode = null
+        railNight = null; railWipe = null; railView = null; railPalette = null; railMode = null; railTrack = null
         railPresets = railButton(R.drawable.ic_compass, "PRESETS", { openPresets() })
+        railTrack = railButton(R.drawable.ic_track, "TRACK", { toggleTracking() })
         if (settings.isSiyi) {
             railView = railButton(R.drawable.ic_view, VIEW_LABELS[viewIndex], { cycleView() }, { switchStream() })
             railPalette = railButton(R.drawable.ic_thermo, "PALETTE", { cyclePalette() })
@@ -309,17 +375,19 @@ class MainActivity : AppCompatActivity() {
         railPhoto = railButton(R.drawable.ic_camera, "PHOTO", { takePhoto() })
         railRec = railButton(R.drawable.ic_record, "REC", { toggleRecord() })
         railRec.accent = ContextCompat.getColor(this, R.color.rec)
+        if (recording) {
+            railRec.isSelected = true
+            railRec.setIcon(R.drawable.ic_stop)
+            railRec.setLabel("STOP")
+        }
         if (settings.isSiyi) {
             railButton(R.drawable.ic_center, "CENTER", { centerGimbal() })
             railMode = railButton(R.drawable.ic_lock, MODE_LABELS[0], { cycleMotionMode() })
         } else {
             railButton(R.drawable.ic_home, "HOME", { goHome() }, { saveHome() })
         }
-        railButton(R.drawable.ic_gallery, "GALLERY", {
-            startActivity(Intent(this, GalleryActivity::class.java))
-        })
-        railButton(R.drawable.ic_tune, "SETTINGS", { openSettings() })
         updateNightUi()
+        updateModeUi()
     }
 
     /** Rail, HUD instruments, badges and connect-screen titles for the selected camera. */
@@ -333,6 +401,9 @@ class MainActivity : AppCompatActivity() {
         debugText.visibility = if (settings.debug) View.VISIBLE else View.GONE
         steps[Step.ONVIF]?.title?.text = if (settings.isSiyi) "GIMBAL" else "ONVIF"
         zoomText.text = "1.0×"
+        swipePad.doubleTapEnabled = settings.isSiyi          // tap-to-aim is ZT6 only
+        keyMap = KeyMapping.load(prefs, settings.model)
+        tracking.gain = settings.trackGain
     }
 
     private fun railButton(icon: Int, label: String, onClick: () -> Unit, onLong: (() -> Unit)? = null): RailButton {
@@ -360,7 +431,8 @@ class MainActivity : AppCompatActivity() {
     private val hideControls = Runnable { setControlsVisible(false) }
 
     private fun anyOverlayOpen() = presetOverlay.visibility == View.VISIBLE ||
-        settingsOverlay.visibility == View.VISIBLE || connectOverlay.visibility == View.VISIBLE
+        settingsOverlay.visibility == View.VISIBLE || connectOverlay.visibility == View.VISIBLE ||
+        swipePad.selectMode
 
     private fun scheduleHide() {
         ui.removeCallbacks(hideControls)
@@ -369,19 +441,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun setControlsVisible(show: Boolean) {
         controlsShown = show
-        for (v in listOf<View>(rail, zoomGroup)) {
+        for (v in listOf(rail, zoomGroup, toolGallery, toolSettings)) {
             v.animate().cancel()
+            val slide = when (v) {
+                rail -> 30 * dp
+                zoomGroup -> -30 * dp
+                else -> 0f
+            }
             if (show) {
                 v.visibility = View.VISIBLE
                 v.animate().alpha(1f).translationX(0f).setDuration(220).start()
             } else {
-                val dx = if (v === rail) 30 * dp else -30 * dp
-                v.animate().alpha(0f).translationX(dx).setDuration(260)
+                v.animate().alpha(0f).translationX(slide).setDuration(260)
                     .withEndAction { if (!controlsShown) v.visibility = View.INVISIBLE }.start()
             }
         }
         if (show) scheduleHide() else ui.removeCallbacks(hideControls)
     }
+
+    private fun View.tick() = performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
 
     // ------------------------------------------------------------------ HUD message strip
 
@@ -499,6 +577,7 @@ class MainActivity : AppCompatActivity() {
                 if (ok != null) {
                     onvif = ok.first
                     ptz.client = ok.first
+                    setControlBadge(true)
                     onvifRtsp = ok.second
                     setStep(Step.ONVIF, StepState.OK, "PTZ ready")
                     if (!isLive) setStep(Step.VIDEO, StepState.ACTIVE, "Opening stream…")
@@ -508,6 +587,7 @@ class MainActivity : AppCompatActivity() {
                     return@launch
                 }
                 setStep(Step.ONVIF, StepState.FAIL, result.exceptionOrNull()?.message ?: "Login failed")
+                setControlBadge(false)
                 if (!playerStarted && s.rtspOverride.isNotBlank()) playStream()
                 delay(4000)
             }
@@ -522,7 +602,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun siyiClient(): SiyiClient? {
         val c = siyi
-        if (c == null) hudMessage("Gimbal not connected yet", error = true)
+        if (c == null) hudMessage(siyiError ?: "Gimbal control is still connecting…", error = true)
         return c
     }
 
@@ -541,33 +621,112 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ SIYI ZT6
 
+    /** Why the gimbal control link is down (shown when a control is used), null when connected. */
+    private var siyiError: String? = null
+
+    private fun rtspHost(url: String): String? =
+        Regex("^\\w+://(?:[^@/]*@)?([^:/]+)").find(url.trim())?.groupValues?.get(1)
+
+    /**
+     * Connects the SIYI control link (UDP, separate from the RTSP video). Tries the configured
+     * gimbal IP first, then the IP of the video URL(s) – if the video plays, the gimbal is there.
+     */
     private fun connectSiyi() {
         onvifJob?.cancel()
         val s = settings
         onvifJob = lifecycleScope.launch {
+            var attempt = 0
             while (isActive) {
+                attempt++
+                setControlBadge(null)
                 setStep(Step.LINK, StepState.ACTIVE, "UDP ${s.host}:${s.port}")
-                val c = SiyiClient(s.host, s.port)
-                c.onFeedback = { msg -> runOnUiThread { hudMessage(msg) } }
-                c.onDebug = { line -> runOnUiThread { addDebug(line) } }
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching { c.open(); c.handshake() }.getOrDefault(false)
-                }
-                if (!ok) {
+                val hosts = (listOf(s.host) + listOfNotNull(rtspHost(s.rtspOverride), rtspHost(s.rtsp2))).distinct()
+                var connected: SiyiClient? = null
+                var result = SiyiClient.Handshake.NO_REPLY
+                var invalidHost = false
+                for (h in hosts) {
+                    val c = SiyiClient(h, s.port)
+                    c.onFeedback = { msg -> runOnUiThread { hudMessage(msg) } }
+                    c.onDebug = { line -> runOnUiThread { addDebug(line) } }
+                    val r = withContext(Dispatchers.IO) {
+                        runCatching { c.open(); c.handshake() }.getOrElse {
+                            if (h == s.host) invalidHost = true
+                            SiyiClient.Handshake.NO_REPLY
+                        }
+                    }
+                    if (r == SiyiClient.Handshake.OK) { connected = c; break }
                     withContext(Dispatchers.IO) { c.close() }
-                    setStep(Step.LINK, StepState.FAIL, "No reply from ${s.host}:${s.port} – check IP / cable")
-                    if (!playerStarted) playStream()      // the video may still work
-                    delay(4000)
+                    if (r == SiyiClient.Handshake.BAD_REPLY) result = r
+                }
+
+                if (connected == null) {
+                    val msg = when {
+                        invalidHost -> "Gimbal IP “${s.host}” is not a valid address – fix it in Settings"
+                        result == SiyiClient.Handshake.BAD_REPLY ->
+                            "Gimbal answers but the replies are unreadable – turn on Settings → Gimbal debug and send a screenshot"
+                        else -> "Gimbal control not answering on ${s.host}:${s.port} (UDP). " +
+                            "Video works separately – check the gimbal IP / port in Settings"
+                    }
+                    siyiError = msg
+                    setControlBadge(false)
+                    setStep(Step.LINK, StepState.FAIL, msg)
+                    if (!playerStarted) playStream()                  // the video may still work
+                    if (attempt == 1 || attempt % 10 == 0) hudMessage(msg, error = true)
+                    delay(3000)
                     continue
                 }
-                siyi = c
-                ptz.client = c
-                setStep(Step.LINK, StepState.OK, s.host)
-                setStep(Step.ONVIF, StepState.OK, "${c.modelName} ready")
+
+                if (connected.host != s.host) {
+                    // found via the video URL: remember the working address
+                    settings = s.copy(host = connected.host)
+                    settings.save(prefs)
+                    hudMessage("Gimbal found at ${connected.host} (video address) – saved")
+                }
+                siyi = connected
+                siyiError = null
+                ptz.client = connected
+                setControlBadge(true)
+                setStep(Step.LINK, StepState.OK, connected.host)
+                setStep(Step.ONVIF, StepState.OK, "${connected.modelName} ready")
+                if (attempt > 1) hudMessage("Gimbal control connected")
                 if (!isLive) setStep(Step.VIDEO, StepState.ACTIVE, "Opening stream…")
                 if (!playerStarted) playStream()
-                startSiyiPolling(c)
+                startSiyiPolling(connected)
                 return@launch
+            }
+        }
+    }
+
+    /** Model badge colour = control link state: green connected, red failed, grey connecting. */
+    private fun setControlBadge(ok: Boolean?) {
+        val col = when (ok) {
+            true -> R.color.ok
+            false -> R.color.err
+            null -> R.color.text_dim
+        }
+        modelText.setTextColor(ContextCompat.getColor(this, col))
+    }
+
+    /** Settings → Gimbal: one-off link test with the values currently typed in the form. */
+    private fun testGimbalLink() {
+        val host = formHost?.text?.toString()?.trim().orEmpty()
+        val port = formPort?.text?.toString()?.toIntOrNull() ?: SiyiClient.DEFAULT_PORT
+        if (!HOST_REGEX.matches(host)) return hudMessage("Enter a valid gimbal IP first", error = true)
+        hudMessage("Testing gimbal control at $host:$port …")
+        lifecycleScope.launch {
+            val c = SiyiClient(host, port)
+            val r = withContext(Dispatchers.IO) {
+                val res = runCatching { c.open(); c.handshake(3000) }.getOrDefault(SiyiClient.Handshake.NO_REPLY)
+                c.close()
+                res
+            }
+            when (r) {
+                SiyiClient.Handshake.OK ->
+                    hudMessage("✓ ${c.modelName} answered from ${c.lastSource ?: host} – control link OK")
+                SiyiClient.Handshake.BAD_REPLY ->
+                    hudMessage("Answered from ${c.lastSource} but ${c.badPackets} replies were unreadable", error = true)
+                SiyiClient.Handshake.NO_REPLY ->
+                    hudMessage("No reply from $host:$port – check the IP, cable and that UDP $port is the SDK port", error = true)
             }
         }
     }
@@ -628,6 +787,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun cycleView() {
+        stopTracking(announce = tracking.isRunning)     // picture changes: the tracked template no longer matches
         viewIndex = (viewIndex + 1) % VIEW_TYPES.size
         val type = VIEW_TYPES[viewIndex]
         railView?.setLabel(VIEW_LABELS[viewIndex])
@@ -637,6 +797,7 @@ class MainActivity : AppCompatActivity() {
     /** Long-press VIEW: switch between the gimbal's two RTSP streams. */
     private fun switchStream() {
         if (settings.rtsp2.isBlank()) return hudMessage("Second stream URL not set (Settings)", error = true)
+        stopTracking(announce = tracking.isRunning)
         streamIndex = 1 - streamIndex
         hudMessage("Stream ${streamIndex + 1}: ${currentStreamUrl()}")
         if (wantPlaying) playStream()
@@ -685,40 +846,311 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private enum class AimResult { REACHED, CANCELLED, TIMEOUT, WRONG_WAY, NO_DATA }
+
+    /**
+     * Closed-loop aim of the ZT6 at (heading°, pitch°) using its attitude feedback.
+     * Suspends until the gimbal is within 1° or the attempt ends; always leaves the gimbal still.
+     */
+    private suspend fun aimTo(c: SiyiClient, targetH: Float, targetP: Float, timeoutMs: Long = 12000): AimResult {
+        val tP = targetP.coerceIn(PITCH_MIN, PITCH_MAX)
+        val start = SystemClock.elapsedRealtime()
+        var worst = Float.MAX_VALUE
+        var result: AimResult? = null
+        try {
+            while (result == null) {
+                val att = c.attitude
+                val now = SystemClock.elapsedRealtime()
+                result = when {
+                    ptz.manualActive -> AimResult.CANCELLED
+                    att == null || now - c.attitudeTime > 1500 -> AimResult.NO_DATA
+                    else -> {
+                        val errH = targetH - (-att.yaw)            // degrees, + = turn right
+                        val errP = tP - att.pitch                  // degrees, + = tilt up
+                        val err = maxOf(abs(errH), abs(errP))
+                        if (err < worst) worst = err
+                        when {
+                            err < 1.0f -> AimResult.REACHED
+                            now - start > timeoutMs -> AimResult.TIMEOUT
+                            err > worst + 25f -> AimResult.WRONG_WAY   // moving away → direction mismatch
+                            else -> {
+                                ptz.autoPan = aimSpeed(errH)
+                                ptz.autoTilt = aimSpeed(errP)
+                                null
+                            }
+                        }
+                    }
+                }
+                if (result == null) delay(100)
+            }
+        } finally {
+            ptz.autoPan = 0f
+            ptz.autoTilt = 0f
+        }
+        return result ?: AimResult.CANCELLED
+    }
+
+    private fun reportAim(what: String, r: AimResult, quiet: Boolean = false) {
+        when (r) {
+            AimResult.REACHED -> if (!quiet) hudMessage("$what reached")
+            AimResult.CANCELLED -> hudMessage("Aiming cancelled")
+            AimResult.TIMEOUT -> hudMessage("$what: timed out", error = true)
+            AimResult.WRONG_WAY -> hudMessage("$what: gimbal moved the wrong way – stopped", error = true)
+            AimResult.NO_DATA -> hudMessage("No gimbal angle data – check the connection", error = true)
+        }
+    }
+
     private fun gotoSiyiPreset(name: String) {
         val c = siyiClient() ?: return
         if (c.attitude == null) return hudMessage("No gimbal angle data yet", error = true)
         closePresets()
         val (targetH, targetP) = siyiPreset(name)
-        aimJob?.cancel()
+        stopAutoModes(announce = false)
         aimJob = lifecycleScope.launch {
             hudMessage("→ $name")
-            val start = SystemClock.elapsedRealtime()
-            var worst = Float.MAX_VALUE
+            reportAim(name, aimTo(c, targetH, targetP))
+        }
+    }
+
+    // ---------------- tap-to-aim (ZT6): double-tap a point → that point becomes the centre
+
+    private fun aimAtPoint(x: Float, y: Float) {
+        if (!settings.isSiyi) return
+        val c = siyiClient() ?: return
+        val att = c.attitude
+        if (att == null || SystemClock.elapsedRealtime() - c.attitudeTime > 1500) {
+            return hudMessage("No gimbal angle data yet", error = true)
+        }
+        val vr = videoRect(swipePad)
+        if (vr.width() <= 0f || !vr.contains(x, y)) return
+        stopAutoModes(announce = false)
+
+        // pinhole camera model: angle = atan(2 · offset · tan(FOV/2) / zoom)
+        val nx = (x - vr.centerX()) / vr.width()              // -0.5 … 0.5, + = right
+        val ny = (y - vr.centerY()) / vr.height()             // -0.5 … 0.5, + = down
+        val hfov = (if (viewIndex == 1) settings.fovThermal else settings.fovRgb).coerceIn(5f, 170f)
+        val zoomX = (c.zoomX ?: 1f).coerceAtLeast(1f)
+        val tanH = tan(Math.toRadians(hfov / 2.0)) / zoomX
+        val tanV = tanH * vr.height() / vr.width()
+        val dYaw = Math.toDegrees(atan(2.0 * nx * tanH)).toFloat()
+        val dPitch = -Math.toDegrees(atan(2.0 * ny * tanV)).toFloat()
+
+        trackOverlay.flashAim(x, y)
+        aimJob = lifecycleScope.launch {
+            reportAim("Target", aimTo(c, -att.yaw + dYaw, att.pitch + dPitch, 6000), quiet = true)
+        }
+    }
+
+    // ---------------- video geometry + frame capture (tracking, photo fallback)
+
+    private fun videoSurface(): SurfaceView? = findViews(videoLayout, SurfaceView::class.java)
+        .filter { it.width > 0 && it.height > 0 && it.holder.surface.isValid }
+        .maxByOrNull { it.width * it.height }
+
+    /** Where the video picture is drawn, in [target]'s coordinates (whole view if unknown). */
+    private fun videoRect(target: View): RectF {
+        val sv = videoSurface() ?: return RectF(0f, 0f, target.width.toFloat(), target.height.toFloat())
+        val a = IntArray(2)
+        val b = IntArray(2)
+        sv.getLocationOnScreen(a)
+        target.getLocationOnScreen(b)
+        val l = (a[0] - b[0]).toFloat()
+        val t = (a[1] - b[1]).toFloat()
+        return RectF(l, t, l + sv.width, t + sv.height)
+    }
+
+    /** The displayed video frame scaled to [width] px (aspect kept), or null. Main thread. */
+    private suspend fun grabVideoFrame(width: Int): Bitmap? {
+        val sv = videoSurface() ?: return null
+        val h = (width.toFloat() * sv.height / sv.width).roundToInt().coerceAtLeast(16)
+        val bmp = Bitmap.createBitmap(width, h, Bitmap.Config.ARGB_8888)
+        return suspendCancellableCoroutine { cont ->
             try {
-                while (isActive) {
-                    if (ptz.manualActive) { hudMessage("Aiming cancelled"); break }
-                    val att = c.attitude ?: break
-                    val errH = targetH - (-att.yaw)            // degrees, + = turn right
-                    val errP = targetP - att.pitch             // degrees, + = tilt up
-                    val err = maxOf(abs(errH), abs(errP))
-                    if (err < 1.0f) { hudMessage("$name reached"); break }
-                    if (SystemClock.elapsedRealtime() - start > 12000) {
-                        hudMessage("$name: timed out", error = true); break
-                    }
-                    if (err < worst) worst = err
-                    if (err > worst + 25f) {                   // moving away → direction mismatch
-                        hudMessage("$name: gimbal moved the wrong way – stopped", error = true); break
-                    }
-                    ptz.autoPan = aimSpeed(errH)
-                    ptz.autoTilt = aimSpeed(errP)
-                    delay(100)
-                }
-            } finally {
-                ptz.autoPan = 0f
-                ptz.autoTilt = 0f
+                PixelCopy.request(sv, bmp, { result ->
+                    if (result == PixelCopy.SUCCESS) cont.resume(bmp) else { bmp.recycle(); cont.resume(null) }
+                }, copyHandler)
+            } catch (e: Exception) {
+                bmp.recycle()
+                cont.resume(null)
             }
         }
+    }
+
+    // ---------------- active tracking (both cameras)
+
+    private val trackListener = object : TrackingController.Listener {
+        override fun onTrackBox(box: RectF?, searching: Boolean, score: Float) {
+            if (box == null) {
+                trackOverlay.showTarget(null)
+                return
+            }
+            val vr = videoRect(trackOverlay)
+            val r = RectF(
+                vr.left + box.left * vr.width(), vr.top + box.top * vr.height(),
+                vr.left + box.right * vr.width(), vr.top + box.bottom * vr.height(),
+            )
+            if (searching) trackOverlay.showTarget(r, TrackOverlayView.State.SEARCHING, "SEARCHING…")
+            else trackOverlay.showTarget(r, TrackOverlayView.State.TRACKING, "TRACKING  ${(score * 100).roundToInt()}%")
+        }
+
+        override fun onTrackEnded(message: String) {
+            val bad = message.contains("lost") || message.startsWith("No ") || message.startsWith("Nothing")
+            hudMessage(message, error = bad)
+            updateModeUi()
+        }
+    }
+
+    private fun toggleTracking() {
+        when {
+            tracking.isRunning -> stopTracking(announce = true)
+            swipePad.selectMode -> cancelSelect()
+            else -> beginSelect()
+        }
+    }
+
+    private fun beginSelect() {
+        if (!isLive) return hudMessage("Wait for live video before tracking", error = true)
+        if (ptz.client == null) return hudMessage("Camera not connected yet", error = true)
+        stopAutoModes(announce = false)
+        swipePad.selectMode = true
+        hudMessage("Draw a box around the target – or tap it")
+        setControlsVisible(true)
+        ui.removeCallbacks(hideControls)
+        updateModeUi()
+    }
+
+    private fun cancelSelect() {
+        swipePad.selectMode = false
+        trackOverlay.showSelection(null)
+        updateModeUi()
+        scheduleHide()
+    }
+
+    private fun startTrackingAt(viewBox: RectF) {
+        swipePad.selectMode = false
+        val vr = videoRect(swipePad)
+        val sel = RectF(viewBox)
+        if (vr.width() <= 0f || !sel.intersect(vr)) {
+            hudMessage("Select something inside the video picture", error = true)
+            updateModeUi()
+            return
+        }
+        val norm = RectF(
+            (sel.left - vr.left) / vr.width(), (sel.top - vr.top) / vr.height(),
+            (sel.right - vr.left) / vr.width(), (sel.bottom - vr.top) / vr.height(),
+        )
+        tracking.gain = settings.trackGain
+        tracking.start(norm)
+        hudMessage("Tracking · swipe or press TRACK to stop")
+        updateModeUi()
+        scheduleHide()
+    }
+
+    private fun stopTracking(announce: Boolean) {
+        val was = tracking.isRunning || swipePad.selectMode
+        tracking.stop()
+        swipePad.selectMode = false
+        trackOverlay.showTarget(null)
+        trackOverlay.showSelection(null)
+        if (announce && was) hudMessage("Tracking stopped")
+        updateModeUi()
+    }
+
+    // ---------------- patrol / scan (both cameras)
+
+    private fun togglePatrol() {
+        if (patrol.isRunning) {
+            patrol.stop()
+            hudMessage("Patrol stopped")
+            updateModeUi()
+        } else {
+            startPatrol()
+        }
+    }
+
+    private fun startPatrol() {
+        if (ptz.client == null) return hudMessage("Camera not connected yet", error = true)
+        val wanted = settings.patrolList
+        val list = if (settings.isSiyi) wanted else wanted.filter { presetToken(it) != null }
+        if (list.isEmpty()) {
+            return hudMessage(
+                if (wanted.isEmpty()) "No patrol presets selected – choose them in Settings → Patrol"
+                else "Save the patrol presets first: aim the camera and hold a preset on the dial",
+                error = true,
+            )
+        }
+        if (list.size < wanted.size) hudMessage("Patrol skips presets that are not saved yet")
+        stopTracking(announce = false)
+        aimJob?.cancel()
+        closePresets()
+        patrolStep = list.first()
+        patrol.start(list, settings.patrolDwellSec * 1000L, settings.patrolLoop)
+        updateModeUi()
+    }
+
+    /** Moves to one patrol preset; true once there, false if it failed or the user took over. */
+    private suspend fun patrolGoTo(name: String): Boolean {
+        return if (settings.isSiyi) {
+            val c = siyi ?: return false
+            val (h, p) = siyiPreset(name)
+            when (aimTo(c, h, p)) {
+                AimResult.REACHED, AimResult.TIMEOUT -> true   // close enough: carry on
+                else -> false
+            }
+        } else {
+            val c = onvif ?: return false
+            val token = presetToken(name) ?: return true          // not saved: skip it
+            val sent = withContext(Dispatchers.IO) { runCatching { c.gotoPreset(token) }.isSuccess }
+            if (!sent) return false
+            // the SHJ does not report its position: allow travel time before the dwell starts
+            var waited = 0L
+            while (waited < SHJ_TRAVEL_MS) {
+                if (ptz.manualActive) return false
+                delay(100)
+                waited += 100
+            }
+            true
+        }
+    }
+
+    private fun onPatrolFinished(reason: String) {
+        hudMessage(reason, error = reason.contains("could not"))
+        updateModeUi()
+    }
+
+    /** Stops patrol, tracking, target selection and any automatic aiming. */
+    private fun stopAutoModes(announce: Boolean) {
+        val hadPatrol = patrol.isRunning
+        patrol.stop()
+        aimJob?.cancel()
+        aimJob = null
+        stopTracking(announce)
+        if (announce && hadPatrol) hudMessage("Patrol stopped")
+        updateModeUi()
+    }
+
+    private fun patrolSummaryText(): String {
+        val list = settings.patrolList
+        if (list.isEmpty()) return "No presets selected (Settings → Patrol)"
+        return list.joinToString(" → ") + " · ${settings.patrolDwellSec} s" + if (settings.patrolLoop) " · loop" else ""
+    }
+
+    /** Rail highlights, mode chip and patrol button reflect patrol / tracking / selection state. */
+    private fun updateModeUi() {
+        val isTracking = tracking.isRunning
+        val isSelecting = swipePad.selectMode
+        val isPatrolling = patrol.isRunning
+        railTrack?.isSelected = isTracking || isSelecting
+        railPresets.isSelected = isPatrolling
+        when {
+            isPatrolling -> { modeChip.text = "■  PATROL · $patrolStep"; modeChip.visibility = View.VISIBLE }
+            isTracking -> { modeChip.text = "■  TRACKING"; modeChip.visibility = View.VISIBLE }
+            isSelecting -> { modeChip.text = "✕  SELECT TARGET"; modeChip.visibility = View.VISIBLE }
+            else -> modeChip.visibility = View.GONE
+        }
+        btnPatrol.text = if (isPatrolling) "STOP PATROL" else "START PATROL"
+        btnPatrol.isSelected = isPatrolling
+        patrolSummary.text = patrolSummaryText()
     }
 
     /** P-controller: 1.5 °/s per ° of error, 90 °/s = full speed, small minimum to beat the deadband. */
@@ -1069,8 +1501,8 @@ class MainActivity : AppCompatActivity() {
                 kbps = 0
             }
             updateLinkUi()
-            clockText.text = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-            updateBattery()
+            clockText.text = clockFormat.format(Date())
+            if (batteryTick++ % 10 == 0) updateBattery()
             ui.postDelayed(this, 1000)
         }
     }
@@ -1092,7 +1524,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateBattery() {
-        val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
+        val i = ContextCompat.registerReceiver(
+            this, null, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED
+        ) ?: return
         val level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
         if (level >= 0 && scale > 0) {
@@ -1170,10 +1604,8 @@ class MainActivity : AppCompatActivity() {
             done(texture.bitmap)
             return
         }
-        val surface = findViews(videoLayout, SurfaceView::class.java)
-            .filter { it.width > 0 && it.height > 0 }
-            .maxByOrNull { it.width * it.height }
-        if (surface == null || !surface.holder.surface.isValid) {
+        val surface = videoSurface()
+        if (surface == null) {
             done(null)
             return
         }
@@ -1340,6 +1772,12 @@ class MainActivity : AppCompatActivity() {
     private var formSd: CheckBox? = null
     private var formDebug: CheckBox? = null
     private var formModel: String = CamSettings.MODEL_SHJ
+    private val formPatrolChecks = LinkedHashMap<String, CheckBox>()
+    private var formDwell: EditText? = null
+    private var formPatrolLoop: CheckBox? = null
+    private var formTrackGain: SeekBar? = null
+    private var formFovRgb: EditText? = null
+    private var formFovThermal: EditText? = null
 
     private fun setupSettingsSheet() {
         settingsOverlay.setOnClickListener { closeSettings() }
@@ -1369,6 +1807,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun closeSettings() {
+        endCapture()
         currentFocus?.let {
             (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken, 0)
         }
@@ -1382,6 +1821,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Builds the side-sheet form for [model] (defaults to the current camera). */
     private fun buildSettingsForm(model: String = settings.model) {
+        captureAction = null                             // a pending button assignment belongs to the old form
         formModel = model
         val s = if (model == settings.model) settings else CamSettings.loadFor(prefs, model)
         val siyiModel = model == CamSettings.MODEL_ZT6
@@ -1456,10 +1896,73 @@ class MainActivity : AppCompatActivity() {
         formZoom = if (siyiModel) null
         else field("Camera optical zoom (×) – for the zoom readout", s.maxZoom.toString(), InputType.TYPE_CLASS_NUMBER)
 
+
+        section("PATROL")
+        label("Presets to visit, in this order: FRONT → RIGHT → REAR → LEFT → UP → DOWN")
+        val chosen = s.patrolList.toSet()
+        formPatrolChecks.clear()
+        for (rowNames in PATROL_ORDER.chunked(3)) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (name in rowNames) {
+                val cb = CheckBox(this).apply {
+                    text = name
+                    isChecked = name in chosen
+                    typeface = fontSemi
+                    textSize = 14f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+                    buttonTintList = ColorStateList.valueOf(ContextCompat.getColor(this@MainActivity, R.color.accent))
+                }
+                formPatrolChecks[name] = cb
+                row.addView(cb, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            settingsContent.addView(row)
+        }
+        formDwell = field("Pause at each preset (seconds, 1 – 300)", s.patrolDwellSec.toString(), InputType.TYPE_CLASS_NUMBER)
+        formPatrolLoop = check("Repeat continuously", s.patrolLoop)
+        if (!siyiModel) label("SHJ-TW10: only presets saved on the dial are visited.")
+
+        section("TRACKING")
+        val gainLabel = label("")
+        formTrackGain = SeekBar(this).apply {
+            max = 100
+            progress = (s.trackGain * 100).toInt()
+            progressTintList = ColorStateList.valueOf(ContextCompat.getColor(this@MainActivity, R.color.accent))
+            thumbTintList = progressTintList
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    gainLabel.text = "Tracking response · ${p.coerceAtLeast(20)} % (lower = smoother, higher = faster)"
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        gainLabel.text = "Tracking response · ${formTrackGain!!.progress.coerceAtLeast(20)} % (lower = smoother, higher = faster)"
+        settingsContent.addView(formTrackGain)
+
+        if (siyiModel) {
+            section("TAP-TO-AIM")
+            label("Double-tap the video to turn the gimbal to that point.")
+            formFovRgb = field(
+                "Visible camera horizontal field of view (°)", s.fovRgb.toString(),
+                InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            )
+            formFovThermal = field(
+                "Thermal camera horizontal field of view (°)", s.fovThermal.toString(),
+                InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            )
+        } else {
+            formFovRgb = null
+            formFovThermal = null
+        }
+
         if (siyiModel) {
             section("GIMBAL")
             formSd = check("Also record on the gimbal's SD card when REC is pressed", s.sdRecord)
             formDebug = check("Show gimbal debug line (TX / RX packets)", s.debug)
+            settingsContent.addView(smallButton("TEST GIMBAL CONTROL LINK") { testGimbalLink() },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()).apply {
+                    topMargin = (8 * dp).toInt()
+                })
             formWiper = null
         } else {
             section("WIPER")
@@ -1467,6 +1970,8 @@ class MainActivity : AppCompatActivity() {
             formSd = null
             formDebug = null
         }
+
+        buildMappingSection(model)
 
         section("ABOUT")
         label("XeraCAM ${versionName()} · SHJ-TW10-IR (ONVIF) · SIYI ZT6 (SIYI SDK) · LibVLC")
@@ -1492,14 +1997,22 @@ class MainActivity : AppCompatActivity() {
         override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup?): View = row(position, true)
     }
 
+    /** Section header with a hairline divider above it (except for the first section). */
     private fun section(title: String) {
+        if (settingsContent.childCount > 0) {
+            settingsContent.addView(View(this).apply {
+                setBackgroundColor(ContextCompat.getColor(this@MainActivity, R.color.glass_stroke))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, maxOf(1, (1 * dp).toInt())).apply {
+                topMargin = (18 * dp).toInt()
+            })
+        }
         settingsContent.addView(TextView(this).apply {
             text = title
             typeface = fontBold
             letterSpacing = 0.25f
             textSize = 12f
             setTextColor(ContextCompat.getColor(this@MainActivity, R.color.accent))
-            setPadding(0, (20 * dp).toInt(), 0, (2 * dp).toInt())
+            setPadding(0, (14 * dp).toInt(), 0, (2 * dp).toInt())
         })
     }
 
@@ -1546,14 +2059,41 @@ class MainActivity : AppCompatActivity() {
         return c
     }
 
+    /** Shows an inline error on [field] and returns false if [ok] is false. */
+    private fun validate(field: EditText?, ok: Boolean, message: String): Boolean {
+        if (!ok) {
+            field?.error = message
+            field?.requestFocus()
+            hudMessage(message, error = true)
+        }
+        return ok
+    }
+
     private fun saveSettings() {
         val model = formModel
         val siyiModel = model == CamSettings.MODEL_ZT6
         val base = if (model == settings.model) settings else CamSettings.loadFor(prefs, model)
+
+        val host = formHost?.text?.toString()?.trim().orEmpty()
+        val port = formPort?.text?.toString()?.toIntOrNull()
+        val dwell = formDwell?.text?.toString()?.toIntOrNull()
+        val fovRgb = formFovRgb?.text?.toString()?.toFloatOrNull()
+        val fovThermal = formFovThermal?.text?.toString()?.toFloatOrNull()
+        if (!validate(formHost, HOST_REGEX.matches(host), "Enter a valid IP address or host name")) return
+        if (!validate(formPort, port != null && port in 1..65535, "Port must be 1 – 65535")) return
+        if (!validate(formDwell, dwell != null && dwell in 1..300, "Pause must be 1 – 300 seconds")) return
+        if (formFovRgb != null &&
+            !validate(formFovRgb, fovRgb != null && fovRgb in 5f..170f, "Field of view must be 5 – 170°")
+        ) return
+        if (formFovThermal != null &&
+            !validate(formFovThermal, fovThermal != null && fovThermal in 5f..170f, "Field of view must be 5 – 170°")
+        ) return
+        val patrolNames = PATROL_ORDER.filter { formPatrolChecks[it]?.isChecked == true }
+
         settings = CamSettings(
             model = model,
-            host = formHost?.text?.toString()?.trim().orEmpty(),
-            port = formPort?.text?.toString()?.toIntOrNull() ?: (if (siyiModel) SiyiClient.DEFAULT_PORT else 80),
+            host = host,
+            port = port ?: (if (siyiModel) SiyiClient.DEFAULT_PORT else 80),
             user = formUser?.text?.toString()?.trim() ?: base.user,
             pass = formPass?.text?.toString() ?: base.pass,
             rtspOverride = formRtsp?.text?.toString()?.trim().orEmpty(),
@@ -1566,6 +2106,12 @@ class MainActivity : AppCompatActivity() {
             maxZoom = (formZoom?.text?.toString()?.toIntOrNull() ?: base.maxZoom).coerceIn(1, 100),
             sdRecord = formSd?.isChecked ?: base.sdRecord,
             debug = formDebug?.isChecked ?: base.debug,
+            patrolPresets = patrolNames.joinToString(","),
+            patrolDwellSec = dwell ?: base.patrolDwellSec,
+            patrolLoop = formPatrolLoop?.isChecked ?: base.patrolLoop,
+            trackGain = ((formTrackGain?.progress ?: 60).coerceAtLeast(20)) / 100f,
+            fovRgb = fovRgb ?: base.fovRgb,
+            fovThermal = fovThermal ?: base.fovThermal,
         )
         settings.save(prefs)
         ptz.maxSpeed = settings.maxSpeed
@@ -1579,12 +2125,14 @@ class MainActivity : AppCompatActivity() {
     }.getOrDefault("")
 
     private fun reconnect() {
+        stopAutoModes(announce = false)
         if (recording) stopRecording()
         stopStream()
         statusJob?.cancel()
         siyiJob?.cancel()
         aimJob?.cancel()
         closeSiyi()
+        siyiError = null
         ptz.client = null
         onvif = null
         onvifRtsp = null
@@ -1620,37 +2168,178 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (isGamepad(event)) {
-            if (event.repeatCount > 0) return true
-            when (keyCode) {
-                KeyEvent.KEYCODE_BUTTON_R1 -> { ptz.buttonZoom = ZOOM_SPEED; return true }
-                KeyEvent.KEYCODE_BUTTON_L1 -> { ptz.buttonZoom = -ZOOM_SPEED; return true }
-                KeyEvent.KEYCODE_BUTTON_A -> { toggleRecord(); return true }
-                KeyEvent.KEYCODE_BUTTON_X -> { takePhoto(); return true }
-                KeyEvent.KEYCODE_BUTTON_Y -> { if (settings.isSiyi) centerGimbal() else goHome(); return true }
-                KeyEvent.KEYCODE_BUTTON_B -> { if (settings.isSiyi) cyclePalette() else setNight(irCut != "OFF"); return true }
+        // 1) Settings → Button mapping is waiting for a button
+        captureAction?.let { action ->
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                endCapture()
+                return true
             }
-            hudMessage("Gamepad key: ${KeyEvent.keyCodeToString(keyCode).removePrefix("KEYCODE_")}")
+            if (KeyMapping.isMappable(keyCode) && event.repeatCount == 0) assignKey(action, keyCode)
+            return true
+        }
+        // 2) typing in a settings field: leave keys alone
+        if (settingsOverlay.visibility == View.VISIBLE) return super.onKeyDown(keyCode, event)
+        // 3) mapped action
+        val action = keyMap[keyCode]
+        if (action != null && action.availableFor(settings.model)) {
+            if (event.repeatCount == 0) {
+                heldKeys[keyCode] = action
+                runAction(action, pressed = true)
+            }
+            return true
         }
         return super.onKeyDown(keyCode, event)
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (isGamepad(event)) {
-            when (keyCode) {
-                KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_BUTTON_L1 -> {
-                    ptz.buttonZoom = 0f
-                    return true
-                }
-                KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_X,
-                KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_BUTTON_B -> return true
-            }
+        heldKeys.remove(keyCode)?.let { action ->
+            if (action.hold) runAction(action, pressed = false)
+            return true
         }
+        if (captureAction != null) return true
         return super.onKeyUp(keyCode, event)
     }
 
-    private fun isGamepad(e: KeyEvent) =
-        e.isFromSource(InputDevice.SOURCE_GAMEPAD) || e.isFromSource(InputDevice.SOURCE_JOYSTICK)
+    private fun runAction(action: CamAction, pressed: Boolean) {
+        if (action.hold) {
+            ptz.buttonZoom = when {
+                !pressed -> 0f
+                action == CamAction.ZOOM_IN -> ZOOM_SPEED
+                else -> -ZOOM_SPEED
+            }
+            return
+        }
+        if (!pressed) return
+        when (action) {
+            CamAction.PHOTO -> takePhoto()
+            CamAction.RECORD -> toggleRecord()
+            CamAction.PRESETS -> if (presetOverlay.visibility == View.VISIBLE) closePresets() else openPresets()
+            CamAction.PATROL -> togglePatrol()
+            CamAction.TRACK -> toggleTracking()
+            CamAction.HOME -> goHome()
+            CamAction.NIGHT -> setNight(irCut != "OFF")
+            CamAction.WIPE -> setWiper(!wiperOn)
+            CamAction.CENTER -> centerGimbal()
+            CamAction.VIEW -> cycleView()
+            CamAction.PALETTE -> cyclePalette()
+            CamAction.MODE -> cycleMotionMode()
+            CamAction.ZOOM_IN, CamAction.ZOOM_OUT -> Unit
+        }
+    }
+
+    // ---------------- Settings → Button mapping
+
+    private var formKeyMap: MutableMap<Int, CamAction> = mutableMapOf()
+    private val mappingLabels = LinkedHashMap<CamAction, TextView>()
+
+    private fun buildMappingSection(model: String) {
+        section("BUTTON MAPPING")
+        label("Tap SET, then press a button on the G20 or a gamepad. Saved instantly for this camera model.")
+        formKeyMap = KeyMapping.load(prefs, model)
+        mappingLabels.clear()
+        for (action in CamAction.forModel(model)) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
+            }
+            row.addView(TextView(this).apply {
+                text = action.label
+                typeface = fontSemi
+                textSize = 14f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            val key = TextView(this).apply {
+                typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
+                textSize = 11f
+                gravity = android.view.Gravity.CENTER
+                setPadding((8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt())
+                setBackgroundResource(R.drawable.glass_pill)
+            }
+            row.addView(key, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = (8 * dp).toInt() })
+            row.addView(smallButton("SET") { beginCapture(action) })
+            row.addView(smallButton("✕") {
+                formKeyMap.entries.removeAll { it.value == action }
+                saveFormKeyMap()
+            }, LinearLayout.LayoutParams((40 * dp).toInt(), (34 * dp).toInt()).apply {
+                marginStart = (6 * dp).toInt()
+            })
+            mappingLabels[action] = key
+            settingsContent.addView(row)
+        }
+        val reset = smallButton("RESET TO DEFAULTS") {
+            KeyMapping.reset(prefs, formModel)
+            formKeyMap = KeyMapping.defaults(formModel).toMutableMap()
+            if (formModel == settings.model) keyMap = formKeyMap.toMutableMap()
+            refreshMappingLabels()
+            hudMessage("Button mapping reset")
+        }
+        settingsContent.addView(reset, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()
+        ).apply { topMargin = (8 * dp).toInt() })
+        refreshMappingLabels()
+    }
+
+    private fun smallButton(text: String, onClick: () -> Unit) = Button(this).apply {
+        this.text = text
+        typeface = fontBold
+        textSize = 12f
+        letterSpacing = 0.06f
+        minWidth = 0
+        minHeight = 0
+        minimumWidth = 0
+        minimumHeight = 0
+        setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), 0)
+        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+        setBackgroundResource(R.drawable.btn_secondary)
+        stateListAnimator = null
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (34 * dp).toInt())
+        setOnClickListener { it.tick(); onClick() }
+    }
+
+    private fun refreshMappingLabels() {
+        val accent = ContextCompat.getColor(this, R.color.accent)
+        val dim = ContextCompat.getColor(this, R.color.text_dim)
+        for ((action, tv) in mappingLabels) {
+            if (action == captureAction) {
+                tv.text = "PRESS A BUTTON…"
+                tv.setTextColor(accent)
+                continue
+            }
+            val code = formKeyMap.entries.firstOrNull { it.value == action }?.key
+            tv.text = code?.let { KeyMapping.keyName(it) } ?: "—"
+            tv.setTextColor(if (code != null) accent else dim)
+        }
+    }
+
+    private fun beginCapture(action: CamAction) {
+        currentFocus?.clearFocus()
+        captureAction = action
+        refreshMappingLabels()
+        hudMessage("Press the button for “${action.label}” (BACK cancels)")
+    }
+
+    private fun endCapture() {
+        captureAction = null
+        if (mappingLabels.isNotEmpty()) refreshMappingLabels()
+    }
+
+    private fun assignKey(action: CamAction, keyCode: Int) {
+        formKeyMap.entries.removeAll { it.value == action }    // one button per action
+        val replaced = formKeyMap.put(keyCode, action)          // a button triggers one action
+        captureAction = null
+        saveFormKeyMap()
+        val note = if (replaced != null && replaced != action) " (was ${replaced.label})" else ""
+        hudMessage("${KeyMapping.keyName(keyCode)} → ${action.label}$note")
+    }
+
+    private fun saveFormKeyMap() {
+        KeyMapping.save(prefs, formModel, formKeyMap)
+        if (formModel == settings.model) keyMap = formKeyMap.toMutableMap()
+        refreshMappingLabels()
+    }
 
     // ------------------------------------------------------------------ misc
 
@@ -1669,6 +2358,11 @@ class MainActivity : AppCompatActivity() {
         private const val MIN_VIDEO_BYTES = 50_000L
         private const val AUTO_HIDE_MS = 4000L
         private const val STALL_TICKS = 6
+        private const val SHJ_TRAVEL_MS = 3000L        // SHJ preset travel allowance during patrol
+        private const val PITCH_MIN = -90f             // ZT6 controllable pitch range
+        private const val PITCH_MAX = 25f
+        private val PATROL_ORDER = listOf("FRONT", "RIGHT", "REAR", "LEFT", "UP", "DOWN")
+        private val HOST_REGEX = Regex("^[A-Za-z0-9]([A-Za-z0-9.-]{0,252})$")
 
         private val PRESET_NAMES = listOf("FRONT", "REAR", "LEFT", "RIGHT", "UP", "DOWN")
 

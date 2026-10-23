@@ -4,6 +4,7 @@ import android.os.SystemClock
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.util.Locale
@@ -24,7 +25,9 @@ interface PtzMover {
  * Command ids and payloads follow SIYI's SDK / ArduPilot's AP_Mount_Siyi driver.
  * Send methods are BLOCKING network calls – use them from Dispatchers.IO.
  */
-class SiyiClient(private val host: String, private val port: Int) : PtzMover {
+class SiyiClient(val host: String, val port: Int) : PtzMover {
+
+    enum class Handshake { OK, NO_REPLY, BAD_REPLY }
 
     data class Attitude(val yaw: Float, val pitch: Float, val roll: Float)
 
@@ -51,12 +54,20 @@ class SiyiClient(private val host: String, private val port: Int) : PtzMover {
         private set
     @Volatile var lastRxTime = 0L
         private set
+    /** Diagnostics: every UDP datagram received, the ones that were not valid SIYI packets, and the sender. */
+    @Volatile var rawPackets = 0
+        private set
+    @Volatile var badPackets = 0
+        private set
+    @Volatile var lastSource: String? = null
+        private set
 
     /** Function feedback (photo / record results) and debug lines. */
     var onFeedback: ((String) -> Unit)? = null
     var onDebug: ((String) -> Unit)? = null
 
     private var socket: DatagramSocket? = null
+    private var target: InetSocketAddress? = null
     @Volatile private var running = false
     private var seq = 0
     private var lastZoomDir = 0
@@ -76,9 +87,12 @@ class SiyiClient(private val host: String, private val port: Int) : PtzMover {
 
     fun open() {
         close()
+        val addr = InetSocketAddress(InetAddress.getByName(host), port)   // throws on an invalid address
+        // Deliberately NOT connect()ed: a connected UDP socket drops every reply whose source port
+        // differs from the destination port, and SIYI firmware may answer from another port.
         val s = DatagramSocket()
         s.soTimeout = 500
-        s.connect(InetSocketAddress(host, port))
+        target = addr
         socket = s
         running = true
         thread(name = "siyi-rx", isDaemon = true) { rxLoop(s) }
@@ -90,17 +104,26 @@ class SiyiClient(private val host: String, private val port: Int) : PtzMover {
         socket = null
     }
 
-    /** Sends identification + attitude requests and waits for any reply. */
-    fun handshake(timeoutMs: Long = 2500): Boolean {
+    /**
+     * Sends identification / attitude / config requests (repeated every 600 ms, because single
+     * UDP packets can be lost on a radio link) until a valid SIYI reply arrives.
+     */
+    fun handshake(timeoutMs: Long = 3000): Handshake {
         val start = SystemClock.elapsedRealtime()
-        requestHardwareId()
-        requestAttitude()
-        requestConfig()
-        while (SystemClock.elapsedRealtime() - start < timeoutMs) {
-            if (lastRxTime >= start) return true
+        var nextSend = start
+        while (true) {
+            val now = SystemClock.elapsedRealtime()
+            if (lastRxTime >= start) return Handshake.OK
+            if (now - start >= timeoutMs) break
+            if (now >= nextSend) {
+                requestHardwareId()
+                requestAttitude()
+                requestConfig()
+                nextSend = now + 600
+            }
             Thread.sleep(50)
         }
-        return false
+        return if (rawPackets > 0) Handshake.BAD_REPLY else Handshake.NO_REPLY
     }
 
     // ------------------------------------------------------------------ commands
@@ -181,7 +204,7 @@ class SiyiClient(private val host: String, private val port: Int) : PtzMover {
         val crc = crc16(buf, 8 + len)
         buf[8 + len] = (crc and 0xFF).toByte()
         buf[9 + len] = ((crc shr 8) and 0xFF).toByte()
-        s.send(DatagramPacket(buf, buf.size))
+        s.send(DatagramPacket(buf, buf.size, target ?: throw IOException("gimbal not connected")))
         if (cmd != CMD_ATTITUDE && cmd != CMD_ROTATION) {
             onDebug?.invoke("TX " + hex(buf, buf.size))
         }
@@ -193,7 +216,12 @@ class SiyiClient(private val host: String, private val port: Int) : PtzMover {
             try {
                 val p = DatagramPacket(buf, buf.size)
                 s.receive(p)
-                parse(buf, p.length)
+                rawPackets++
+                lastSource = "${p.address?.hostAddress}:${p.port}"
+                if (!parse(buf, p.length)) {
+                    badPackets++
+                    onDebug?.invoke("RX invalid from $lastSource: " + hex(buf, minOf(p.length, 24)))
+                }
             } catch (_: SocketTimeoutException) {
                 // keep waiting
             } catch (e: Exception) {
@@ -202,20 +230,24 @@ class SiyiClient(private val host: String, private val port: Int) : PtzMover {
         }
     }
 
-    private fun parse(b: ByteArray, n: Int) {
+    /** Returns true if the datagram contained at least one valid SIYI packet. */
+    private fun parse(b: ByteArray, n: Int): Boolean {
+        var valid = false
         var i = 0
         while (i + 10 <= n) {
             if (b[i] != 0x55.toByte() || b[i + 1] != 0x66.toByte()) { i++; continue }
             val len = u8(b, i + 3) or (u8(b, i + 4) shl 8)
             val total = 10 + len
-            if (i + total > n) return
+            if (i + total > n) return valid
             val crc = u8(b, i + 8 + len) or (u8(b, i + 9 + len) shl 8)
             val calc = crc16(b.copyOfRange(i, i + 8 + len), 8 + len)
             if (crc == calc) {
                 handle(u8(b, i + 7), b, i + 8, len)
+                valid = true
             }
             i += total
         }
+        return valid
     }
 
     private fun handle(cmd: Int, b: ByteArray, d: Int, len: Int) {

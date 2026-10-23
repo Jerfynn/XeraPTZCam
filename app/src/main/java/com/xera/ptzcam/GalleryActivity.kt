@@ -70,6 +70,7 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var tabVideos: TextView
 
     private var showVideos = false
+    private var loadJob: Job? = null
     private val adapter = MediaAdapter()
     private val thumbs = LruCache<Uri, Bitmap>(80)
 
@@ -132,7 +133,8 @@ class GalleryActivity : AppCompatActivity() {
 
     private fun load() {
         val videos = showVideos
-        lifecycleScope.launch {
+        loadJob?.cancel()                      // a newer request replaces any load still running
+        loadJob = lifecycleScope.launch {
             val items = withContext(Dispatchers.IO) { runCatching { query(videos) }.getOrDefault(emptyList()) }
             if (videos != showVideos) return@launch
             adapter.submit(items)

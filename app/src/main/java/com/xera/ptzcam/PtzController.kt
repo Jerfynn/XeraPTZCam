@@ -58,6 +58,7 @@ class PtzController(
             var lastSend = 0L
             var hadError = false
 
+            var lastClient: PtzMover? = null
             while (isActive) {
                 val c = client
                 if (c == null) {
@@ -65,9 +66,17 @@ class PtzController(
                     delay(100)
                     continue
                 }
+                if (c !== lastClient) {          // camera switched / reconnected: fresh state
+                    lastClient = c
+                    moving = false
+                    last = floatArrayOf(0f, 0f, 0f)
+                }
 
-                val pan = q((stickPan + padPan + swipePan + autoPan).coerceIn(-1f, 1f) * maxSpeed)
-                val tilt = q((stickTilt + padTilt + swipeTilt + autoTilt).coerceIn(-1f, 1f) * maxSpeed)
+                // manual input is limited by the max-speed setting; automatic aiming/tracking
+                // commands are already scaled by their own controllers (scaling them again made
+                // small corrections round to zero, so aiming stalled just short of the target)
+                val pan = q(((stickPan + padPan + swipePan).coerceIn(-1f, 1f) * maxSpeed + autoPan).coerceIn(-1f, 1f))
+                val tilt = q(((stickTilt + padTilt + swipeTilt).coerceIn(-1f, 1f) * maxSpeed + autoTilt).coerceIn(-1f, 1f))
                 val zoom = q((padZoom + buttonZoom + swipeZoom + rockerZoom).coerceIn(-1f, 1f))
                 val now = SystemClock.elapsedRealtime()
 

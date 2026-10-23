@@ -11,8 +11,8 @@ android {
         applicationId = "com.xera.ptzcam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 7
-        versionName = "3.0"
+        versionCode = 9
+        versionName = "3.1.1"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 

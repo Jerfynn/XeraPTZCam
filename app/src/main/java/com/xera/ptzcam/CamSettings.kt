@@ -22,7 +22,19 @@ data class CamSettings(
     val maxZoom: Int = 30,
     val sdRecord: Boolean = true,
     val debug: Boolean = false,
+    /** Patrol: presets to visit, in order (comma separated names). */
+    val patrolPresets: String = DEFAULT_PATROL,
+    val patrolDwellSec: Int = 5,
+    val patrolLoop: Boolean = true,
+    /** Tracking response 0.2 … 1.0. */
+    val trackGain: Float = 0.6f,
+    /** ZT6 horizontal field of view at 1× (degrees) – used by tap-to-aim. */
+    val fovRgb: Float = 84.5f,
+    val fovThermal: Float = 32.8f,
 ) {
+    val patrolList: List<String>
+        get() = patrolPresets.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+
     val isSiyi get() = model == MODEL_ZT6
 
     fun save(p: SharedPreferences) {
@@ -43,6 +55,12 @@ data class CamSettings(
             .putBoolean("swipeInv", swipeInvert)
             .putBoolean("sdRecord", sdRecord)
             .putBoolean("debug", debug)
+            .putString(pre + "patrol", patrolPresets)
+            .putInt(pre + "patrolDwell", patrolDwellSec)
+            .putBoolean(pre + "patrolLoop", patrolLoop)
+            .putFloat("trackGain", trackGain)
+            .putFloat("fovRgb", fovRgb)
+            .putFloat("fovThermal", fovThermal)
             .apply()
     }
 
@@ -50,6 +68,7 @@ data class CamSettings(
         const val MODEL_SHJ = "SHJ-TW10-IR"
         const val MODEL_ZT6 = "SIYI ZT6"
         val MODELS = listOf(MODEL_SHJ, MODEL_ZT6)
+        const val DEFAULT_PATROL = "FRONT,RIGHT,REAR,LEFT"
 
         private fun prefix(model: String) = if (model == MODEL_ZT6) "zt6_" else ""
 
@@ -76,6 +95,12 @@ data class CamSettings(
                 maxZoom = p.getInt(pre + "maxZoom", if (siyi) 6 else 30),
                 sdRecord = p.getBoolean("sdRecord", true),
                 debug = p.getBoolean("debug", false),
+                patrolPresets = p.getString(pre + "patrol", DEFAULT_PATROL) ?: DEFAULT_PATROL,
+                patrolDwellSec = p.getInt(pre + "patrolDwell", 5),
+                patrolLoop = p.getBoolean(pre + "patrolLoop", true),
+                trackGain = p.getFloat("trackGain", 0.6f),
+                fovRgb = p.getFloat("fovRgb", 84.5f),
+                fovThermal = p.getFloat("fovThermal", 32.8f),
             )
         }
     }

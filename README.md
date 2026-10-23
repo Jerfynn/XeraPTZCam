@@ -27,28 +27,41 @@ Recommended for a 30 km radio link (Video/Audio page):
 3. Connect the G20 to the PC with USB-C, select it in Android Studio, press Run.
    Or: Build → Build APK(s), copy app-debug.apk to the G20 and install it.
 
-## 3. Use (v3.0 – two camera models)
+## 3. Use (v3.1)
 
-Choose the camera in Settings → CAMERA MODEL (dropdown). Each model keeps its own IP / ports / streams.
+Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / ports / streams / button mapping.
 
-### SHJ-TW10-IR (ONVIF)
-- Rail: PRESETS · NIGHT (hold = AUTO) · WIPE · PHOTO · REC · HOME (hold = save) · GALLERY · SETTINGS
-- Presets are stored in the camera: aim, then hold a preset on the dial to save.
+### Screen layout
+- Top-left: status strip (link, bitrate, REC timer, temperature, IR, battery, clock). Top-right: mode chip
+  (PATROL / TRACKING – tap to stop), GALLERY and SETTINGS.
+- Right rail – SHJ-TW10: PRESETS · TRACK · NIGHT · WIPE · PHOTO · REC · HOME
+- Right rail – ZT6:     PRESETS · TRACK · VIEW · PALETTE · PHOTO · REC · CENTER · MODE
+- Left: ZOOM rocker. Tap the video to show / hide the controls (they auto-hide after 4 s).
 
-### SIYI ZT6 (SIYI SDK over UDP, default 192.168.144.25:37260)
-- Video: rtsp://192.168.144.25:8554/video1 (main), /video2 (second) – hold VIEW to switch streams.
-- Rail: PRESETS · VIEW (RGB / THERMAL / SPLIT) · PALETTE (11 thermal palettes) · PHOTO · REC ·
-  CENTER · MODE (LOCK / FOLLOW / FPV) · GALLERY · SETTINGS
-- HUD: live compass (F/R/B/L) and tilt scale from the gimbal's attitude; thermal ▲max ▼min °C in the status strip.
-- Presets work immediately: FRONT 0°, RIGHT 90°, REAR 180°, LEFT −90°, UP +25°, DOWN −90°.
-  Hold a preset to store the current angles instead. The app steers the gimbal there (closed loop).
-- REC records MP4 in the app AND (optional) on the gimbal SD card. PHOTO saves on the gimbal SD + a frame in the app.
-- Settings → "Show gimbal debug line" displays TX/RX packets for troubleshooting.
+### Patrol / scan (both cameras)
+- PRESETS → START PATROL. Visits the presets chosen in Settings → Patrol (order FRONT → RIGHT → REAR →
+  LEFT → UP → DOWN), pausing at each (default 5 s), looping if "Repeat" is on.
+- Any swipe, joystick input, or the PATROL chip stops it.
+- SHJ-TW10 visits only presets saved on the dial. ZT6 presets work immediately (angles).
+
+### Active tracking (both cameras)
+- Press TRACK, then draw a box around the target (or tap it). The camera keeps it centred.
+- Cyan box = tracking, amber = searching. Lost for 3 s → stops and tells you. Swipe or TRACK to stop.
+- Settings → Tracking response: lower = smoother, higher = faster.
+- Works best on objects with visible detail; thermal view is excellent for people / animals.
+
+### Tap-to-aim (ZT6 only)
+- Double-tap any point of the video: the gimbal turns so that point becomes the centre.
+- Uses the field of view (Settings → Tap-to-aim: visible 84.5°, thermal 32.8°) and the current zoom.
+
+### Button mapping (both cameras)
+- Settings → BUTTON MAPPING: tap SET, press a G20 / gamepad button. ✕ clears, RESET restores defaults.
+- Actions: zoom in/out (hold), photo, record, presets, patrol, tracking, plus HOME / NIGHT / WIPE (SHJ)
+  or CENTER / VIEW / PALETTE / MODE (ZT6).
+- Defaults: R1/L1 zoom, A record, X photo, Y home/centre, B night/palette, START patrol, SELECT tracking.
 
 ### Common
-- Swipe = pan/tilt, pinch or ZOOM rocker = zoom, tap video = show/hide controls.
-- Gamepad: left stick pan/tilt, right stick zoom, LB/RB zoom, A = REC, X = PHOTO,
-  Y = HOME / CENTER, B = NIGHT / PALETTE.
+- Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.
 - Requires Android 10 or newer.
 
 Fonts: Rajdhani and JetBrains Mono (SIL Open Font License, see fonts-license/).
