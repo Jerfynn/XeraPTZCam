@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.xera.ptzcam"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 5
+        versionName = "2.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
@@ -29,9 +29,10 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    // RTSP playback + recording (MediaPlayer.record)
+    // RTSP playback + MP4 recording (stream output)
     implementation("org.videolan.android:libvlc-all:3.5.1")
 }

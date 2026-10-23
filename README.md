@@ -27,20 +27,22 @@ Recommended for a 30 km radio link (Video/Audio page):
 3. Connect the G20 to the PC with USB-C, select it in Android Studio, press Run.
    Or: Build → Build APK(s), copy app-debug.apk to the G20 and install it.
 
-## 3. Use
+## 3. Use (v2.0 – Tactical HUD interface)
 
-- First launch opens Settings: camera IP, port 80, admin + your password.
-- Swipe on the video: camera follows the swipe; further = faster, flick = short burst. Pinch = zoom.
-- Joystick (bottom-left): pan/tilt.
-- ZOOM + / ZOOM − (hold): zoom in / out.
-- NIGHT: tap toggles night (IR, black-and-white) on/off; hold = AUTO (camera decides).
-- PHOTO: full-resolution JPEG from the camera (falls back to a screen grab) → Pictures/XeraCAM.
-- REC: start/stop video recording → Movies/XeraCAM.
-- HOME: tap = go to home position; hold = save the current view as home.
-- Presets FRONT / REAR / LEFT / RIGHT / UP / DOWN: aim the camera, hold the button to save
-  (it turns blue), then tap to return. "Clear presets" in Settings resets them.
+- Connect screen: LINK → ONVIF → VIDEO checks; disappears when video is live (SKIP / SETTINGS available).
+- Video is full-screen. Tap the video to show / hide the controls; they auto-hide after 4 s.
+- HUD: centre crosshair, compass tape (F / R / B / L relative to the vehicle front), tilt scale,
+  zoom readout. Saving the FRONT preset (or Settings → "Set current direction as FRONT") aligns the compass.
+- Status strip: link quality (green / amber / red), bitrate, REC timer, IR badge, battery, clock.
+- Swipe on the video = pan/tilt (further = faster, flick = burst). Pinch or the left ZOOM rocker = zoom.
+- Right rail: PRESETS (compass dial – tap = go, hold = save), NIGHT (hold = AUTO), WIPE, PHOTO, REC,
+  HOME (tap = go, hold = save), GALLERY, SETTINGS.
+- Recording: red frame pulses; MP4 files go to Movies/XeraCAM. Photos go to Pictures/XeraCAM.
+- Gallery: Photos / Videos tabs; tap = open, long-press = share / delete.
 - Gamepad: left stick pan/tilt, right stick zoom, LB/RB zoom, A = REC, X = PHOTO, Y = HOME, B = NIGHT.
-- Video auto-reconnects after link dropouts; recording resumes automatically.
+- Requires Android 10 or newer.
+
+Fonts: Rajdhani and JetBrains Mono (SIL Open Font License, see fonts-license/).
 
 ## Notes
 
@@ -50,4 +52,3 @@ Recommended for a 30 km radio link (Video/Audio page):
   drive the camera's RS485 input with Pelco-D.
 - If recording reports "not available", change libvlc-all in app/build.gradle.kts to 3.6.0 and rebuild,
   or record on the camera's SD card (Storage menu).
-# XeraPTZCam

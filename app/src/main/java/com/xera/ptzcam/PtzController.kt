@@ -38,6 +38,7 @@ class PtzController(
     @Volatile var swipePan = 0f
     @Volatile var swipeTilt = 0f
     @Volatile var swipeZoom = 0f
+    @Volatile var rockerZoom = 0f
     @Volatile var maxSpeed = 1f
 
     private var job: Job? = null
@@ -60,7 +61,7 @@ class PtzController(
 
                 val pan = q((stickPan + padPan + swipePan).coerceIn(-1f, 1f) * maxSpeed)
                 val tilt = q((stickTilt + padTilt + swipeTilt).coerceIn(-1f, 1f) * maxSpeed)
-                val zoom = q((padZoom + buttonZoom + swipeZoom).coerceIn(-1f, 1f))
+                val zoom = q((padZoom + buttonZoom + swipeZoom + rockerZoom).coerceIn(-1f, 1f))
                 val now = SystemClock.elapsedRealtime()
 
                 try {
@@ -103,7 +104,7 @@ class PtzController(
         job?.cancel()
         job = null
         stickPan = 0f; stickTilt = 0f; padPan = 0f; padTilt = 0f; padZoom = 0f; buttonZoom = 0f
-        swipePan = 0f; swipeTilt = 0f; swipeZoom = 0f
+        swipePan = 0f; swipeTilt = 0f; swipeZoom = 0f; rockerZoom = 0f
         val c = client ?: return
         scope.launch(Dispatchers.IO) { runCatching { c.stop() } }
     }

@@ -1,21 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="@color/bg_deep">
 
     <org.videolan.libvlc.util.VLCVideoLayout
         android:id="@+id/videoLayout"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Swipe / pinch layer over the video -->
+    <!-- Instrument overlay (crosshair, compass, tilt) -->
+    <com.xera.ptzcam.HudView
+        android:id="@+id/hud"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Invisible swipe / pinch / tap layer -->
     <com.xera.ptzcam.SwipePadView
         android:id="@+id/swipePad"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- White flash for photo capture (not clickable, touches pass through) -->
+    <!-- Pulsing red frame while recording -->
+    <View
+        android:id="@+id/recFrame"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/rec_frame"
+        android:visibility="gone" />
+
+    <!-- Photo shutter flash -->
     <View
         android:id="@+id/flashView"
         android:layout_width="match_parent"
@@ -23,138 +38,403 @@
         android:background="#FFFFFF"
         android:visibility="gone" />
 
-    <!-- Top status bar -->
+    <!-- ===== Status strip ===== -->
     <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:background="#66000000"
+        android:id="@+id/statusStrip"
+        android:layout_width="wrap_content"
+        android:layout_height="34dp"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/glass_pill"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="16dp"
-        android:paddingTop="4dp"
-        android:paddingEnd="12dp"
-        android:paddingBottom="4dp">
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp">
+
+        <View
+            android:id="@+id/linkDot"
+            android:layout_width="9dp"
+            android:layout_height="9dp"
+            android:background="@drawable/dot" />
 
         <TextView
+            android:id="@+id/linkText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginEnd="14dp"
-            android:text="XeraCAM"
-            android:textColor="#4FC3F7"
-            android:textSize="15sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="Connecting…"
-            android:textColor="#FFFFFF"
+            android:layout_marginStart="7dp"
+            android:fontFamily="@font/rajdhani_bold"
+            android:letterSpacing="0.1"
+            android:text="OFFLINE"
+            android:textColor="@color/text_main"
             android:textSize="13sp" />
 
         <TextView
-            android:id="@+id/recText"
+            android:id="@+id/bitrateText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginEnd="14dp"
+            android:layout_marginStart="12dp"
+            android:fontFamily="@font/jetbrains_mono"
+            android:text="— kbps"
+            android:textColor="@color/text_dim"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/recPill"
+            android:layout_width="wrap_content"
+            android:layout_height="22dp"
+            android:layout_marginStart="12dp"
+            android:background="@drawable/rec_pill"
+            android:fontFamily="@font/jetbrains_mono"
+            android:gravity="center"
+            android:paddingStart="9dp"
+            android:paddingEnd="9dp"
             android:text="● REC 00:00"
-            android:textColor="#FF5252"
-            android:textSize="15sp"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
             android:textStyle="bold"
             android:visibility="gone" />
 
-        <Button
-            android:id="@+id/btnSettings"
-            style="@style/CamButton"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_margin="0dp"
-            android:text="⚙"
-            android:textSize="18sp" />
+        <TextView
+            android:id="@+id/nightBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="20dp"
+            android:layout_marginStart="10dp"
+            android:background="@drawable/badge_bg"
+            android:fontFamily="@font/rajdhani_bold"
+            android:gravity="center"
+            android:letterSpacing="0.1"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="IR ON"
+            android:textColor="@color/accent"
+            android:textSize="10sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/batteryText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:fontFamily="@font/jetbrains_mono"
+            android:text="--%"
+            android:textColor="@color/text_dim"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/clockText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:fontFamily="@font/jetbrains_mono"
+            android:text="00:00:00"
+            android:textColor="@color/text_main"
+            android:textSize="11sp" />
     </LinearLayout>
 
-    <!-- On-screen joystick: pan / tilt -->
-    <com.xera.ptzcam.JoystickView
-        android:id="@+id/joystick"
-        android:layout_width="170dp"
-        android:layout_height="170dp"
-        android:layout_gravity="bottom|start"
-        android:layout_margin="20dp" />
-
-    <!-- Preset panel: tap = go, long-press = save -->
+    <!-- ===== Zoom rocker (left) ===== -->
     <LinearLayout
+        android:id="@+id/zoomGroup"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="12dp"
-        android:background="@drawable/panel_bg"
+        android:layout_gravity="start|center_vertical"
+        android:layout_marginStart="14dp"
         android:gravity="center_horizontal"
-        android:orientation="vertical"
-        android:padding="6dp">
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/zoomText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
+            android:background="@drawable/glass_pill"
+            android:fontFamily="@font/jetbrains_mono"
+            android:paddingStart="8dp"
+            android:paddingTop="2dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="2dp"
+            android:text="1.0×"
+            android:textColor="@color/accent"
+            android:textSize="12sp" />
+
+        <com.xera.ptzcam.ZoomRockerView
+            android:id="@+id/zoomRocker"
+            android:layout_width="46dp"
+            android:layout_height="190dp" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="PRESETS · tap = go · hold = save"
-            android:textColor="#BBFFFFFF"
+            android:layout_marginTop="4dp"
+            android:fontFamily="@font/rajdhani_bold"
+            android:letterSpacing="0.15"
+            android:text="ZOOM"
+            android:textColor="@color/text_dim"
             android:textSize="10sp" />
-
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button android:id="@+id/presetFront" style="@style/PresetButton" android:text="FRONT" />
-            <Button android:id="@+id/presetLeft" style="@style/PresetButton" android:text="LEFT" />
-            <Button android:id="@+id/presetUp" style="@style/PresetButton" android:text="UP" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button android:id="@+id/presetRear" style="@style/PresetButton" android:text="REAR" />
-            <Button android:id="@+id/presetRight" style="@style/PresetButton" android:text="RIGHT" />
-            <Button android:id="@+id/presetDown" style="@style/PresetButton" android:text="DOWN" />
-        </LinearLayout>
     </LinearLayout>
 
-    <!-- Right-hand controls: 2 columns x 3 -->
+    <!-- ===== Glass control rail (right) ===== -->
     <LinearLayout
+        android:id="@+id/rail"
+        android:layout_width="66dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end"
+        android:layout_marginTop="10dp"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="10dp"
+        android:background="@drawable/glass_panel"
+        android:orientation="vertical"
+        android:padding="5dp" />
+
+    <!-- ===== HUD message strip ===== -->
+    <TextView
+        android:id="@+id/hudMsg"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_marginEnd="14dp"
-        android:layout_marginBottom="14dp"
-        android:orientation="horizontal">
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="18dp"
+        android:alpha="0"
+        android:background="@drawable/glass_pill"
+        android:fontFamily="@font/rajdhani_semibold"
+        android:maxWidth="520dp"
+        android:paddingStart="18dp"
+        android:paddingTop="7dp"
+        android:paddingEnd="18dp"
+        android:paddingBottom="7dp"
+        android:textColor="@color/text_main"
+        android:textSize="14sp" />
+
+    <!-- ===== Connect screen ===== -->
+    <FrameLayout
+        android:id="@+id/connectOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#F2070B14"
+        android:clickable="true"
+        android:focusable="true">
 
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center_horizontal"
             android:orientation="vertical">
 
-            <Button android:id="@+id/btnZoomIn" style="@style/CamButton" android:text="ZOOM\n+" />
-            <Button android:id="@+id/btnZoomOut" style="@style/CamButton" android:text="ZOOM\n−" />
-            <Button android:id="@+id/btnNight" style="@style/CamButton" android:text="NIGHT\nOFF" />
+            <ImageView
+                android:id="@+id/connectLogo"
+                android:layout_width="120dp"
+                android:layout_height="120dp"
+                android:contentDescription="XeraCAM"
+                android:src="@mipmap/ic_launcher_foreground" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="-14dp"
+                android:fontFamily="@font/rajdhani_bold"
+                android:letterSpacing="0.25"
+                android:text="XERACAM"
+                android:textColor="@color/text_main"
+                android:textSize="30sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="@font/rajdhani_semibold"
+                android:letterSpacing="0.35"
+                android:text="PTZ CAMERA CONTROL"
+                android:textColor="@color/accent"
+                android:textSize="11sp" />
+
+            <LinearLayout
+                android:layout_width="300dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="22dp"
+                android:background="@drawable/glass_panel"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <include android:id="@+id/stepLink" layout="@layout/connect_step" />
+                <include android:id="@+id/stepOnvif" layout="@layout/connect_step" />
+                <include android:id="@+id/stepVideo" layout="@layout/connect_step" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="300dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/connectSettings"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_marginEnd="10dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/btn_secondary"
+                    android:fontFamily="@font/rajdhani_bold"
+                    android:stateListAnimator="@null"
+                    android:text="SETTINGS"
+                    android:textColor="@color/text_main"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/connectSkip"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/btn_secondary"
+                    android:fontFamily="@font/rajdhani_bold"
+                    android:stateListAnimator="@null"
+                    android:text="SKIP"
+                    android:textColor="@color/text_main"
+                    android:textSize="13sp" />
+            </LinearLayout>
         </LinearLayout>
+    </FrameLayout>
+    <!-- ===== Preset dial overlay ===== -->
+    <FrameLayout
+        android:id="@+id/presetOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#8C000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
 
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center_horizontal"
             android:orientation="vertical">
 
-            <Button android:id="@+id/btnPhoto" style="@style/CamButton" android:text="PHOTO" />
-            <Button
-                android:id="@+id/btnRecord"
-                style="@style/CamButton"
-                android:background="@drawable/btn_rec"
-                android:text="REC" />
-            <Button android:id="@+id/btnHome" style="@style/CamButton" android:text="HOME" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="@font/rajdhani_bold"
+                android:letterSpacing="0.3"
+                android:text="PRESETS"
+                android:textColor="@color/accent"
+                android:textSize="15sp" />
+
+            <com.xera.ptzcam.PresetDialView
+                android:id="@+id/presetDial"
+                android:layout_width="250dp"
+                android:layout_height="250dp"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="@font/rajdhani_semibold"
+                android:letterSpacing="0.12"
+                android:text="TAP = GO   ·   HOLD = SAVE   ·   TAP OUTSIDE = CLOSE"
+                android:textColor="@color/text_dim"
+                android:textSize="11sp" />
         </LinearLayout>
-    </LinearLayout>
+    </FrameLayout>
+
+    <!-- ===== Settings side sheet ===== -->
+    <FrameLayout
+        android:id="@+id/settingsOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#80000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/settingsPanel"
+            android:layout_width="380dp"
+            android:layout_height="match_parent"
+            android:layout_gravity="end"
+            android:background="@drawable/glass_sheet"
+            android:clickable="true"
+            android:focusable="true"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="22dp"
+                android:paddingTop="12dp"
+                android:paddingEnd="10dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:fontFamily="@font/rajdhani_bold"
+                    android:letterSpacing="0.25"
+                    android:text="SETTINGS"
+                    android:textColor="@color/text_main"
+                    android:textSize="18sp" />
+
+                <ImageButton
+                    android:id="@+id/settingsClose"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@drawable/rail_item_bg"
+                    android:contentDescription="Close"
+                    android:src="@drawable/ic_close" />
+            </LinearLayout>
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:fadingEdgeLength="16dp"
+                android:requiresFadingEdge="vertical">
+
+                <LinearLayout
+                    android:id="@+id/settingsContent"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingStart="22dp"
+                    android:paddingEnd="22dp"
+                    android:paddingBottom="12dp" />
+            </ScrollView>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <Button
+                    android:id="@+id/settingsClear"
+                    android:layout_width="0dp"
+                    android:layout_height="46dp"
+                    android:layout_marginEnd="10dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/btn_secondary"
+                    android:fontFamily="@font/rajdhani_bold"
+                    android:letterSpacing="0.08"
+                    android:stateListAnimator="@null"
+                    android:text="CLEAR PRESETS"
+                    android:textColor="@color/text_main"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/settingsSave"
+                    android:layout_width="0dp"
+                    android:layout_height="46dp"
+                    android:layout_weight="1.4"
+                    android:background="@drawable/btn_primary"
+                    android:fontFamily="@font/rajdhani_bold"
+                    android:letterSpacing="0.08"
+                    android:stateListAnimator="@null"
+                    android:text="SAVE &amp; RECONNECT"
+                    android:textColor="#0B111C"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
 </FrameLayout>

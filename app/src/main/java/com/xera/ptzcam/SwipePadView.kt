@@ -5,8 +5,6 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Paint
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -24,6 +22,7 @@ import kotlin.math.sign
  *           (full speed after ~60 dp). Keep the finger down to keep moving.
  *  - Flick: a fast swipe keeps the camera moving briefly after release (momentum).
  *  - Pinch: two fingers apart = zoom in, together = zoom out.
+ * The layer is invisible – nothing is drawn while dragging.
  */
 class SwipePadView @JvmOverloads constructor(
     context: Context,
@@ -32,11 +31,14 @@ class SwipePadView @JvmOverloads constructor(
 
     var onPanTilt: ((Float, Float) -> Unit)? = null
     var onZoom: ((Float) -> Unit)? = null
+    /** Short tap without movement (used to show / hide the controls). */
+    var onTap: (() -> Unit)? = null
     var invert = false
 
     private val dp = resources.displayMetrics.density
     private val fullSpeedDist = 60f * dp
     private val deadZone = 5f * dp
+    private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()
 
     private var tracking = false
     private var downX = 0f
@@ -45,16 +47,6 @@ class SwipePadView @JvmOverloads constructor(
     private var curY = 0f
     private var tracker: VelocityTracker? = null
     private var fling: ValueAnimator? = null
-
-    private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x99FFFFFF.toInt(); style = Paint.Style.STROKE; strokeWidth = 3f * dp
-    }
-    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xAA29B6F6.toInt(); strokeWidth = 4f * dp; strokeCap = Paint.Cap.ROUND
-    }
-    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xDD29B6F6.toInt(); style = Paint.Style.FILL
-    }
 
     private val scaleDetector = ScaleGestureDetector(context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -89,13 +81,11 @@ class SwipePadView @JvmOverloads constructor(
                 tracking = true
                 tracker?.recycle()
                 tracker = VelocityTracker.obtain().also { it.addMovement(e) }
-                invalidate()
             }
             MotionEvent.ACTION_MOVE -> if (tracking) {
                 tracker?.addMovement(e)
                 curX = e.x; curY = e.y
                 send(map(curX - downX), -map(curY - downY))
-                invalidate()
             }
             MotionEvent.ACTION_UP -> if (tracking) {
                 tracker?.addMovement(e)
@@ -104,8 +94,14 @@ class SwipePadView @JvmOverloads constructor(
                 val vy = (tracker?.yVelocity ?: 0f) / dp
                 tracker?.recycle(); tracker = null
                 tracking = false
-                invalidate()
-                startFling(vx, vy)
+                val isTap = hypot(e.x - downX, e.y - downY) < touchSlop &&
+                    e.eventTime - e.downTime < 300
+                if (isTap) {
+                    send(0f, 0f)
+                    onTap?.invoke()
+                } else {
+                    startFling(vx, vy)
+                }
             }
             MotionEvent.ACTION_CANCEL -> endDrag()
         }
@@ -128,7 +124,6 @@ class SwipePadView @JvmOverloads constructor(
         tracking = false
         tracker?.recycle(); tracker = null
         send(0f, 0f)
-        invalidate()
     }
 
     /** Fast flick: keep moving for a moment, slowing down. */
@@ -155,14 +150,6 @@ class SwipePadView @JvmOverloads constructor(
             })
             start()
         }
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        if (!tracking) return
-        canvas.drawCircle(downX, downY, fullSpeedDist, ringPaint)
-        canvas.drawLine(downX, downY, curX, curY, linePaint)
-        canvas.drawCircle(curX, curY, 10f * dp, dotPaint)
     }
 
     override fun onDetachedFromWindow() {

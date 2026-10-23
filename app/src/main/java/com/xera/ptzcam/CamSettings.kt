@@ -12,6 +12,8 @@ data class CamSettings(
     val maxSpeed: Float,
     val cachingMs: Int,
     val swipeInvert: Boolean = false,
+    val wiperPreset: String = "",
+    val maxZoom: Int = 30,
 ) {
     fun save(p: SharedPreferences) {
         p.edit()
@@ -24,6 +26,8 @@ data class CamSettings(
             .putFloat("speed", maxSpeed)
             .putInt("cache", cachingMs)
             .putBoolean("swipeInv", swipeInvert)
+            .putString("wiperPreset", wiperPreset)
+            .putInt("maxZoom", maxZoom)
             .apply()
     }
 
@@ -38,6 +42,8 @@ data class CamSettings(
             maxSpeed = p.getFloat("speed", 1f),
             cachingMs = p.getInt("cache", 200),
             swipeInvert = p.getBoolean("swipeInv", false),
+            wiperPreset = p.getString("wiperPreset", "") ?: "",
+            maxZoom = p.getInt("maxZoom", 30),
         )
     }
 }

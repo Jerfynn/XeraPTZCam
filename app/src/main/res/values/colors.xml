@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="accent">#29B6F6</color>
+    <color name="accent_soft">#3329B6F6</color>
+    <color name="bg_deep">#070B14</color>
+    <color name="glass">#B30B111C</color>
+    <color name="glass_stroke">#2EFFFFFF</color>
+    <color name="text_main">#F2FFFFFF</color>
+    <color name="text_dim">#99FFFFFF</color>
+    <color name="rec">#FF1744</color>
+    <color name="ok">#00E676</color>
+    <color name="warn">#FFC400</color>
+    <color name="err">#FF5252</color>
+</resources>

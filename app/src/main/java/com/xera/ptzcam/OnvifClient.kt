@@ -18,6 +18,9 @@ import java.util.concurrent.TimeUnit
 
 class OnvifException(message: String) : Exception(message)
 
+/** Camera position in ONVIF generic space: pan/tilt -1..1, zoom 0..1 (null if not reported). */
+data class PtzStatus(val pan: Float?, val tilt: Float?, val zoom: Float?)
+
 /**
  * Minimal ONVIF client: service discovery, RTSP URI, PTZ moves, presets, home position,
  * night mode (IR-cut filter + IR lamp) and JPEG snapshots.
@@ -47,6 +50,10 @@ class OnvifClient(
     private var clockOffsetMs = 0L
     @Volatile private var nonceCount = 0
 
+    /** Auxiliary commands the camera reports (e.g. "tt:Wiper|On"). Filled by connect(). */
+    var auxCommands: List<String> = emptyList()
+        private set
+
     /** Connects and returns the RTSP URI of the first profile (null if the camera gives none). */
     fun connect(): String? {
         syncClock()
@@ -65,6 +72,14 @@ class OnvifClient(
             ?: throw OnvifException("camera returned no media profile")
         videoSourceToken = Regex("<(?:\\w+:)?SourceToken>([^<]+)<")
             .find(profiles)?.groupValues?.get(1)?.trim()
+
+        auxCommands = try {
+            val nodes = soap(ptzUrl, "<tptz:GetNodes xmlns:tptz=\"$NS_PTZ\"/>")
+            Regex("<(?:\\w+:)?AuxiliaryCommands>([^<]+)<").findAll(nodes)
+                .map { it.groupValues[1].trim() }.filter { it.isNotEmpty() }.distinct().toList()
+        } catch (e: Exception) {
+            emptyList()
+        }
 
         return try {
             val r = soap(
@@ -119,6 +134,21 @@ class OnvifClient(
         )
         return Regex("<(?:\\w+:)?PresetToken>([^<]+)<").find(r)?.groupValues?.get(1)?.trim()
             ?: token ?: throw OnvifException("camera did not return a preset token")
+    }
+
+    fun getStatus(): PtzStatus {
+        val r = soap(
+            ptzUrl,
+            "<tptz:GetStatus xmlns:tptz=\"$NS_PTZ\"><tptz:ProfileToken>$profileToken</tptz:ProfileToken>" +
+                "</tptz:GetStatus>"
+        )
+        val pos = r.substringAfter("Position", "")
+        val pt = Regex("<(?:\\w+:)?PanTilt\\b([^>]*)>").find(pos)?.groupValues?.get(1)
+        val zm = Regex("<(?:\\w+:)?Zoom\\b([^>]*)>").find(pos)?.groupValues?.get(1)
+        fun attr(tag: String?, name: String): Float? = tag?.let {
+            Regex("\\b$name=\"([-+0-9.eE]+)\"").find(it)?.groupValues?.get(1)?.toFloatOrNull()
+        }
+        return PtzStatus(attr(pt, "x"), attr(pt, "y"), attr(zm, "x"))
     }
 
     fun gotoHome() {
