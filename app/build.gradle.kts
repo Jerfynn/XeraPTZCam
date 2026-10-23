@@ -33,5 +33,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // RTSP playback + recording (MediaPlayer.record)
-    implementation("org.videolan.android:libvlc-all:3.7.6")
+    implementation("org.videolan.android:libvlc-all:3.5.1")
 }
