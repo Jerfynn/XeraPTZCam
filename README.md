@@ -53,6 +53,18 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - ZT6: corrections are scaled automatically to the active lens (visible / thermal) and the zoom level,
   so tracking behaves the same in thermal view and when zoomed in.
 
+- v3.1.6 tracking rework:
+  - ZT6: steers by gimbal ANGLE. Each frame is turned into the target's absolute angle using the gimbal
+    angle at the moment that frame was filmed (video delay compensated), then the gimbal is driven there
+    with its live angle reading. A still target → the gimbal settles and stops (no overshoot / run-away).
+  - Other cameras: gentle proportional control, no integral term, stop zone with hysteresis.
+  - The camera only moves on confident matches. Weak, look-alike or jumping matches hold the camera still
+    and keep the last good position, so it no longer chases wrong detections.
+  - Split view (visible | thermal side by side) is detected automatically: the target is tracked and
+    centred within its own half.
+  - Settings → "Tracking: video delay" (0 = automatic). If the gimbal still overshoots a still target,
+    raise it in steps of 100 ms; if it reacts sluggishly, lower it.
+
 ### Tap-to-aim (ZT6 only)
 - Double-tap any point of the video: the gimbal turns so that point becomes the centre.
 - Uses the field of view (Settings → Tap-to-aim: visible 84.5°, thermal 32.8°) and the current zoom.

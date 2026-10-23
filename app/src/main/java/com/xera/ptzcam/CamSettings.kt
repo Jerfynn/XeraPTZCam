@@ -30,6 +30,8 @@ data class CamSettings(
     val patrolLoop: Boolean = true,
     /** Tracking response 0.2 … 1.0. */
     val trackGain: Float = 0.6f,
+    /** Video delay used by tracking, ms (0 = automatic from the video buffer). */
+    val trackDelayMs: Int = 0,
     /** ZT6 horizontal field of view at 1× (degrees) – used by tap-to-aim. */
     val fovRgb: Float = 84.5f,
     val fovThermal: Float = 32.8f,
@@ -63,6 +65,7 @@ data class CamSettings(
             .putInt(pre + "patrolDwell", patrolDwellSec)
             .putBoolean(pre + "patrolLoop", patrolLoop)
             .putFloat("trackGain", trackGain)
+            .putInt("trackDelay", trackDelayMs)
             .putFloat("fovRgb", fovRgb)
             .putFloat("fovThermal", fovThermal)
             .apply()
@@ -108,6 +111,7 @@ data class CamSettings(
                 patrolDwellSec = p.getInt(pre + "patrolDwell", 5),
                 patrolLoop = p.getBoolean(pre + "patrolLoop", true),
                 trackGain = p.getFloat("trackGain", 0.6f),
+                trackDelayMs = p.getInt("trackDelay", 0),
                 fovRgb = p.getFloat("fovRgb", 84.5f),
                 fovThermal = p.getFloat("fovThermal", 32.8f),
             )

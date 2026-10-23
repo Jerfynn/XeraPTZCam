@@ -274,6 +274,9 @@ class MainActivity : AppCompatActivity() {
             grabFrame = { w -> grabVideoFrame(w) },
             angleScale = { trackingAngleScale() },
             listener = trackListener,
+            fovDeg = { thermal -> trackingFov(thermal) },
+            attitude = { trackingAttitude() },
+            videoDelayMs = { trackingVideoDelay() },
         )
         patrol = PatrolRunner(
             lifecycleScope,
@@ -846,7 +849,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 c.motionMode?.let { m -> railMode?.setLabel(MODE_LABELS.getOrElse(m) { "MODE" }) }
                 tick++
-                delay(100)
+                delay(if (tracking.isRunning) 50 else 100)       // 20 Hz angles while tracking
             }
         }
     }
@@ -1070,6 +1073,10 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        override fun onTrackInfo(message: String) {
+            runOnUiThread { hudMessage(message) }
+        }
+
         override fun onTrackEnded(message: String) {
             val bad = message.contains("lost") || message.startsWith("No ") || message.startsWith("Nothing")
             hudMessage(message, error = bad)
@@ -1081,6 +1088,28 @@ class MainActivity : AppCompatActivity() {
      * Real angle covered by the screen relative to the visible camera at 1× (see TrackingController).
      * ZT6: thermal lens and zoom are known. SHJ: no field-of-view data → 1 (use Tracking response).
      */
+    /** Horizontal FOV (degrees, zoom applied) of the thermal or visible picture – ZT6 only. */
+    private fun trackingFov(thermal: Boolean): Float {
+        if (!settings.isSiyi) return 60f
+        val zoomX = (siyi?.zoomX ?: 1f).coerceAtLeast(1f)
+        return if (thermal) settings.fovThermal / (if (viewIndex == 1) zoomX else 1f)
+        else settings.fovRgb / zoomX
+    }
+
+    /** Live gimbal angle for tracking (ZT6), or null → tracking falls back to speed control. */
+    private fun trackingAttitude(): TrackingController.Att? {
+        val c = siyi ?: return null
+        val a = c.attitude ?: return null
+        val t = c.attitudeTime
+        if (SystemClock.elapsedRealtime() - t > 600) return null
+        return TrackingController.Att(t, -a.yaw, a.pitch)       // SIYI yaw + = left → + = right
+    }
+
+    /** How old the picture on screen is: Settings value, or buffer + typical link/decoder delay. */
+    private fun trackingVideoDelay(): Long =
+        if (settings.trackDelayMs > 0) settings.trackDelayMs.toLong()
+        else settings.cachingMs + 220L
+
     private fun trackingAngleScale(): Float {
         if (!settings.isSiyi) return 1f
         val fov = if (viewIndex == 1) settings.fovThermal else settings.fovRgb
@@ -1956,6 +1985,7 @@ class MainActivity : AppCompatActivity() {
     private var formDwell: EditText? = null
     private var formPatrolLoop: CheckBox? = null
     private var formTrackGain: SeekBar? = null
+    private var formTrackDelay: EditText? = null
     private var formFovRgb: EditText? = null
     private var formFovThermal: EditText? = null
 
@@ -2121,6 +2151,10 @@ class MainActivity : AppCompatActivity() {
         }
         gainLabel.text = "Tracking response · ${formTrackGain!!.progress.coerceAtLeast(20)} % (lower = smoother, higher = faster)"
         settingsContent.addView(formTrackGain)
+        formTrackDelay = field(
+            "Tracking: video delay, ms (0 = automatic). Raise it if the camera still overshoots a still target.",
+            s.trackDelayMs.toString(), InputType.TYPE_CLASS_NUMBER,
+        )
 
         if (siyiModel) {
             section("TAP-TO-AIM")
@@ -2300,6 +2334,7 @@ class MainActivity : AppCompatActivity() {
             patrolDwellSec = dwell ?: base.patrolDwellSec,
             patrolLoop = formPatrolLoop?.isChecked ?: base.patrolLoop,
             trackGain = ((formTrackGain?.progress ?: 60).coerceAtLeast(20)) / 100f,
+            trackDelayMs = (formTrackDelay?.text?.toString()?.toIntOrNull() ?: base.trackDelayMs).coerceIn(0, 2000),
             fovRgb = fovRgb ?: base.fovRgb,
             fovThermal = fovThermal ?: base.fovThermal,
         )
