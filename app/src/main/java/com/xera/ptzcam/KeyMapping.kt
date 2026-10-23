@@ -3,88 +3,76 @@ package com.xera.ptzcam
 import android.content.SharedPreferences
 import android.view.KeyEvent
 
-/** Everything a hardware / gamepad button can be mapped to. */
-enum class CamAction(
-    val label: String,
-    /** null = available on every camera model. */
-    val model: String? = null,
-    /** true = active while held (zoom), false = fires once on press. */
-    val hold: Boolean = false,
-) {
-    ZOOM_IN("Zoom in", hold = true),
-    ZOOM_OUT("Zoom out", hold = true),
-    PHOTO("Take photo"),
-    RECORD("Record start / stop"),
-    PRESETS("Open presets"),
-    PATROL("Patrol start / stop"),
-    TRACK("Tracking start / stop"),
-    HOME("Go to HOME", CamSettings.MODEL_SHJ),
-    NIGHT("Night mode on / off", CamSettings.MODEL_SHJ),
-    WIPE("Wiper", CamSettings.MODEL_SHJ),
-    CENTER("Centre gimbal", CamSettings.MODEL_ZT6),
-    VIEW("Next view (RGB / thermal / split)", CamSettings.MODEL_ZT6),
-    PALETTE("Next thermal palette", CamSettings.MODEL_ZT6),
-    MODE("Gimbal mode (lock / follow / FPV)", CamSettings.MODEL_ZT6);
+/** What a hardware button can do: move the gimbal while it is held. */
+enum class CamAction(val label: String, val pan: Int, val tilt: Int) {
+    MOVE_LEFT("Move left", -1, 0),
+    MOVE_RIGHT("Move right", 1, 0),
+    MOVE_UP("Move up", 0, 1),
+    MOVE_DOWN("Move down", 0, -1);
 
-    fun availableFor(cameraModel: String) = model == null || model == cameraModel
-
-    companion object {
-        fun forModel(cameraModel: String) = values().filter { it.availableFor(cameraModel) }
-    }
+    /** Every action is active while the button is held. */
+    val hold get() = true
 }
 
 /**
- * Per-camera-model mapping of key codes to actions, stored in SharedPreferences as
- * "keyCode:ACTION,keyCode:ACTION". Defaults reproduce the previous fixed gamepad layout.
+ * Button → movement mapping, shared by all camera models, stored as "id:ACTION,id:ACTION".
+ *
+ * A button is identified by its Android key code. Some ground-station buttons (Skydroid) arrive with
+ * key code 0 (UNKNOWN) and only a hardware scan code – those are stored as a NEGATIVE id (−scanCode),
+ * so they can be mapped as well.
  */
 object KeyMapping {
+
+    private const val PREF = "keymap_v2"      // new key: old 14-action mappings are dropped
 
     /** Keys that must keep their system meaning and can never be mapped. */
     private val RESERVED = setOf(
         KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_POWER,
-        KeyEvent.KEYCODE_APP_SWITCH, KeyEvent.KEYCODE_MENU,
+        KeyEvent.KEYCODE_APP_SWITCH,
     )
 
-    fun isMappable(keyCode: Int) = keyCode != KeyEvent.KEYCODE_UNKNOWN && keyCode !in RESERVED
-
-    private fun prefKey(model: String) = "keymap_" + if (model == CamSettings.MODEL_ZT6) "zt6" else "shj"
-
-    fun defaults(model: String): Map<Int, CamAction> {
-        val zt6 = model == CamSettings.MODEL_ZT6
-        return linkedMapOf(
-            KeyEvent.KEYCODE_BUTTON_R1 to CamAction.ZOOM_IN,
-            KeyEvent.KEYCODE_BUTTON_L1 to CamAction.ZOOM_OUT,
-            KeyEvent.KEYCODE_BUTTON_A to CamAction.RECORD,
-            KeyEvent.KEYCODE_BUTTON_X to CamAction.PHOTO,
-            KeyEvent.KEYCODE_BUTTON_Y to if (zt6) CamAction.CENTER else CamAction.HOME,
-            KeyEvent.KEYCODE_BUTTON_B to if (zt6) CamAction.PALETTE else CamAction.NIGHT,
-            KeyEvent.KEYCODE_BUTTON_START to CamAction.PATROL,
-            KeyEvent.KEYCODE_BUTTON_SELECT to CamAction.TRACK,
-        )
+    /** Mapping id of a key event: key code, or −scanCode when the key code is unknown. 0 = unusable. */
+    fun idOf(e: KeyEvent): Int = when {
+        e.keyCode != KeyEvent.KEYCODE_UNKNOWN -> e.keyCode
+        e.scanCode > 0 -> -e.scanCode
+        else -> 0
     }
 
-    fun load(p: SharedPreferences, model: String): MutableMap<Int, CamAction> {
-        val raw = p.getString(prefKey(model), null) ?: return defaults(model).toMutableMap()
+    fun isMappable(id: Int) = id != 0 && id !in RESERVED
+
+    fun defaults(): Map<Int, CamAction> = linkedMapOf(
+        KeyEvent.KEYCODE_DPAD_LEFT to CamAction.MOVE_LEFT,
+        KeyEvent.KEYCODE_DPAD_RIGHT to CamAction.MOVE_RIGHT,
+        KeyEvent.KEYCODE_DPAD_UP to CamAction.MOVE_UP,
+        KeyEvent.KEYCODE_DPAD_DOWN to CamAction.MOVE_DOWN,
+    )
+
+    @Suppress("UNUSED_PARAMETER")
+    fun load(p: SharedPreferences, model: String = ""): MutableMap<Int, CamAction> {
+        val raw = p.getString(PREF, null) ?: return defaults().toMutableMap()
         val map = linkedMapOf<Int, CamAction>()
         for (entry in raw.split(',')) {
             val parts = entry.split(':')
             if (parts.size != 2) continue
-            val code = parts[0].toIntOrNull() ?: continue
+            val id = parts[0].toIntOrNull() ?: continue
             val action = runCatching { CamAction.valueOf(parts[1]) }.getOrNull() ?: continue
-            if (isMappable(code) && action.availableFor(model)) map[code] = action
+            if (isMappable(id)) map[id] = action
         }
         return map
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun save(p: SharedPreferences, model: String, map: Map<Int, CamAction>) {
-        p.edit().putString(prefKey(model), map.entries.joinToString(",") { "${it.key}:${it.value.name}" }).apply()
+        p.edit().putString(PREF, map.entries.joinToString(",") { "${it.key}:${it.value.name}" }).apply()
     }
 
-    fun reset(p: SharedPreferences, model: String) {
-        p.edit().remove(prefKey(model)).apply()
+    @Suppress("UNUSED_PARAMETER")
+    fun reset(p: SharedPreferences, model: String = "") {
+        p.edit().remove(PREF).apply()
     }
 
-    /** "R1", "VOLUME UP", "F3" … */
-    fun keyName(keyCode: Int): String =
-        KeyEvent.keyCodeToString(keyCode).removePrefix("KEYCODE_").removePrefix("BUTTON_").replace('_', ' ')
+    /** "DPAD LEFT", "R1", "SCAN 248" … */
+    fun keyName(id: Int): String =
+        if (id < 0) "SCAN ${-id}"
+        else KeyEvent.keyCodeToString(id).removePrefix("KEYCODE_").removePrefix("BUTTON_").replace('_', ' ')
 }

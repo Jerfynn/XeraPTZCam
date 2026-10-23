@@ -69,11 +69,15 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - Double-tap any point of the video: the gimbal turns so that point becomes the centre.
 - Uses the field of view (Settings → Tap-to-aim: visible 84.5°, thermal 32.8°) and the current zoom.
 
-### Button mapping (both cameras)
-- Settings → BUTTON MAPPING: tap SET, press a G20 / gamepad button. ✕ clears, RESET restores defaults.
-- Actions: zoom in/out (hold), photo, record, presets, patrol, tracking, plus HOME / NIGHT / WIPE (SHJ)
-  or CENTER / VIEW / PALETTE / MODE (ZT6).
-- Defaults: R1/L1 zoom, A record, X photo, Y home/centre, B night/palette, START patrol, SELECT tracking.
+### Button mapping (v3.1.7 – movement only)
+- Settings → BUTTON MAPPING has four actions: Move left, Move right, Move up, Move down.
+  Hold a button = gimbal moves, release = stops. One mapping for both cameras. Defaults: D-pad arrows.
+- Tap SET, press the G20 / gamepad button. ✕ clears, RESET restores the D-pad defaults.
+- Keys are now caught before Android's focus navigation (earlier versions lost D-pad/arrow keys to the
+  on-screen buttons, so nothing happened). Buttons that send only a hardware scan code ("SCAN 123") work too.
+- The box under the mapping shows the last button pressed (name, key code, scan code, device). If a G20
+  button shows nothing there, the controller does not send it to Android and no app can use it –
+  set that button's function in the G20's own Skydroid settings instead.
 
 ### Video transport
 - "RTSP over TCP" (default, recommended for Skydroid / any radio link): lost packets are re-sent and the

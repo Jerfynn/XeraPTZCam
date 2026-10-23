@@ -313,7 +313,7 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
         stopAutoModes(announce = false)
         endCapture()
-        heldKeys.clear()
+        releaseAllKeys()
         if (recording) stopRecording(restartStream = false)
         if (wiperOn) setWiper(false)
         ui.removeCallbacks(statsTicker)
@@ -340,7 +340,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars()
+        if (hasFocus) hideSystemBars() else releaseAllKeys()   // a key-up may never arrive
     }
 
     @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
@@ -2018,6 +2018,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeSettings() {
         endCapture()
+        lastKeyText = null
         endAxisLearn()
         axisMonitor = null
         currentFocus?.let {
@@ -2397,64 +2398,79 @@ class MainActivity : AppCompatActivity() {
         return super.onGenericMotionEvent(event)
     }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+    /**
+     * All hardware keys are handled HERE, before Android's focus navigation sees them.
+     * (Before v3.1.7 the keys went through onKeyDown, which never fires for D-pad / arrow keys while
+     * an on-screen button has focus – the view hierarchy uses them to move the focus instead. That is
+     * why the Skydroid buttons appeared to do nothing.)
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val id = KeyMapping.idOf(event)
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) showLastKey(event, id)
+        val handled = when (event.action) {
+            KeyEvent.ACTION_DOWN -> handleKeyDown(id, event)
+            KeyEvent.ACTION_UP -> handleKeyUp(id)
+            else -> false
+        }
+        return handled || super.dispatchKeyEvent(event)
+    }
+
+    private fun handleKeyDown(id: Int, event: KeyEvent): Boolean {
         // 1) Settings → Button mapping is waiting for a button
         captureAction?.let { action ->
-            if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
                 endCapture()
                 return true
             }
-            if (KeyMapping.isMappable(keyCode) && event.repeatCount == 0) assignKey(action, keyCode)
+            if (KeyMapping.isMappable(id) && event.repeatCount == 0) assignKey(action, id)
+            else if (id == 0) hudMessage("That button sends no key code – it can't be mapped", error = true)
             return true
         }
         // 2) typing in a settings field: leave keys alone
-        if (settingsOverlay.visibility == View.VISIBLE) return super.onKeyDown(keyCode, event)
-        // 3) mapped action
-        val action = keyMap[keyCode]
-        if (action != null && action.availableFor(settings.model)) {
-            if (event.repeatCount == 0) {
-                heldKeys[keyCode] = action
-                runAction(action, pressed = true)
-            }
-            return true
+        if (settingsOverlay.visibility == View.VISIBLE && currentFocus is EditText) return false
+        // 3) mapped movement
+        val action = keyMap[id] ?: return false
+        if (event.repeatCount == 0) {
+            heldKeys[id] = action
+            updateKeyMovement()
         }
-        return super.onKeyDown(keyCode, event)
+        return true
     }
 
-    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        heldKeys.remove(keyCode)?.let { action ->
-            if (action.hold) runAction(action, pressed = false)
+    private fun handleKeyUp(id: Int): Boolean {
+        if (heldKeys.remove(id) != null) {
+            updateKeyMovement()
             return true
         }
-        if (captureAction != null) return true
-        return super.onKeyUp(keyCode, event)
+        return captureAction != null
     }
 
-    private fun runAction(action: CamAction, pressed: Boolean) {
-        if (action.hold) {
-            ptz.buttonZoom = when {
-                !pressed -> 0f
-                action == CamAction.ZOOM_IN -> ZOOM_SPEED
-                else -> -ZOOM_SPEED
-            }
-            return
-        }
-        if (!pressed) return
-        when (action) {
-            CamAction.PHOTO -> takePhoto()
-            CamAction.RECORD -> toggleRecord()
-            CamAction.PRESETS -> if (presetOverlay.visibility == View.VISIBLE) closePresets() else openPresets()
-            CamAction.PATROL -> togglePatrol()
-            CamAction.TRACK -> toggleTracking()
-            CamAction.HOME -> goHome()
-            CamAction.NIGHT -> setNight(irCut != "OFF")
-            CamAction.WIPE -> setWiper(!wiperOn)
-            CamAction.CENTER -> centerGimbal()
-            CamAction.VIEW -> cycleView()
-            CamAction.PALETTE -> cyclePalette()
-            CamAction.MODE -> cycleMotionMode()
-            CamAction.ZOOM_IN, CamAction.ZOOM_OUT -> Unit
-        }
+    /** Pan / tilt from all held movement buttons (left + right cancel out). */
+    private fun updateKeyMovement() {
+        var pan = 0
+        var tilt = 0
+        for (a in heldKeys.values.toSet()) { pan += a.pan; tilt += a.tilt }
+        ptz.keyPan = pan.coerceIn(-1, 1) * KEY_SPEED
+        ptz.keyTilt = tilt.coerceIn(-1, 1) * KEY_SPEED
+    }
+
+    private fun releaseAllKeys() {
+        heldKeys.clear()
+        ptz.keyPan = 0f
+        ptz.keyTilt = 0f
+    }
+
+    private var lastKeyText: TextView? = null
+
+    private fun showLastKey(e: KeyEvent, id: Int) {
+        val tv = lastKeyText ?: return
+        if (settingsOverlay.visibility != View.VISIBLE) return
+        val mapped = keyMap[id]?.let { " → ${it.label}" } ?: ""
+        tv.text = String.format(
+            Locale.US, "Last button: %s  (key %d, scan %d)%s\n%s",
+            if (id == 0) "UNKNOWN" else KeyMapping.keyName(id), e.keyCode, e.scanCode, mapped,
+            e.device?.name ?: "unknown device",
+        )
     }
 
     // ---------------- Settings → Joystick channels (pan / tilt / zoom)
@@ -2657,10 +2673,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildMappingSection(model: String) {
         section("BUTTON MAPPING")
-        label("Tap SET, then press a button on the G20 or a gamepad. Saved instantly for this camera model.")
+        label("Gimbal movement buttons. Tap SET, then press the G20 / gamepad button. " +
+            "Held = moves, released = stops. Saved instantly, used for both cameras.")
         formKeyMap = KeyMapping.load(prefs, model)
         mappingLabels.clear()
-        for (action in CamAction.forModel(model)) {
+        for (action in CamAction.values()) {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = android.view.Gravity.CENTER_VERTICAL
@@ -2694,13 +2711,24 @@ class MainActivity : AppCompatActivity() {
         }
         val reset = smallButton("RESET TO DEFAULTS") {
             KeyMapping.reset(prefs, formModel)
-            formKeyMap = KeyMapping.defaults(formModel).toMutableMap()
-            if (formModel == settings.model) keyMap = formKeyMap.toMutableMap()
+            formKeyMap = KeyMapping.defaults().toMutableMap()
+            keyMap = formKeyMap.toMutableMap()
             refreshMappingLabels()
-            hudMessage("Button mapping reset")
+            hudMessage("Button mapping reset (D-pad arrows)")
         }
         settingsContent.addView(reset, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()
+        ).apply { topMargin = (8 * dp).toInt() })
+        lastKeyText = TextView(this).apply {
+            typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
+            textSize = 11f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+            setBackgroundResource(R.drawable.field_bg)
+            setPadding((10 * dp).toInt(), (8 * dp).toInt(), (10 * dp).toInt(), (8 * dp).toInt())
+            text = "Press any G20 button – it will show here.\nIf nothing appears, that button is not sent to Android."
+        }
+        settingsContent.addView(lastKeyText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = (8 * dp).toInt() })
         refreshMappingLabels()
     }
@@ -2760,7 +2788,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveFormKeyMap() {
         KeyMapping.save(prefs, formModel, formKeyMap)
-        if (formModel == settings.model) keyMap = formKeyMap.toMutableMap()
+        keyMap = formKeyMap.toMutableMap()
         refreshMappingLabels()
     }
 
@@ -2775,7 +2803,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val ZOOM_SPEED = 0.6f
+        private const val KEY_SPEED = 0.5f         // gimbal speed while a movement button is held
         private const val HOME_PRESET = "10"
         private const val WIPER_RUN_MS = 6000L
         private const val MIN_VIDEO_BYTES = 50_000L
