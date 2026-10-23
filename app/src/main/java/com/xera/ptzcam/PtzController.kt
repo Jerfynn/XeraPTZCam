@@ -27,7 +27,7 @@ class PtzController(
     private val scope: CoroutineScope,
     private val onStatus: (String) -> Unit,
 ) {
-    @Volatile var client: OnvifClient? = null
+    @Volatile var client: PtzMover? = null
 
     @Volatile var stickPan = 0f
     @Volatile var stickTilt = 0f
@@ -39,6 +39,9 @@ class PtzController(
     @Volatile var swipeTilt = 0f
     @Volatile var swipeZoom = 0f
     @Volatile var rockerZoom = 0f
+    /** Automatic aiming (ZT6 presets) – overridden by any manual input. */
+    @Volatile var autoPan = 0f
+    @Volatile var autoTilt = 0f
     @Volatile var maxSpeed = 1f
 
     /** True while pan/tilt commands are being sent (used to detect cameras that never report position). */
@@ -63,8 +66,8 @@ class PtzController(
                     continue
                 }
 
-                val pan = q((stickPan + padPan + swipePan).coerceIn(-1f, 1f) * maxSpeed)
-                val tilt = q((stickTilt + padTilt + swipeTilt).coerceIn(-1f, 1f) * maxSpeed)
+                val pan = q((stickPan + padPan + swipePan + autoPan).coerceIn(-1f, 1f) * maxSpeed)
+                val tilt = q((stickTilt + padTilt + swipeTilt + autoTilt).coerceIn(-1f, 1f) * maxSpeed)
                 val zoom = q((padZoom + buttonZoom + swipeZoom + rockerZoom).coerceIn(-1f, 1f))
                 val now = SystemClock.elapsedRealtime()
 
@@ -105,12 +108,18 @@ class PtzController(
         }
     }
 
+    /** True while the user is steering manually (cancels automatic aiming). */
+    val manualActive: Boolean
+        get() = stickPan != 0f || stickTilt != 0f || padPan != 0f || padTilt != 0f ||
+            swipePan != 0f || swipeTilt != 0f
+
     /** Stops the loop and the camera. */
     fun halt() {
         job?.cancel()
         job = null
         stickPan = 0f; stickTilt = 0f; padPan = 0f; padTilt = 0f; padZoom = 0f; buttonZoom = 0f
         swipePan = 0f; swipeTilt = 0f; swipeZoom = 0f; rockerZoom = 0f
+        autoPan = 0f; autoTilt = 0f
         val c = client ?: return
         scope.launch(Dispatchers.IO) { runCatching { c.stop() } }
     }

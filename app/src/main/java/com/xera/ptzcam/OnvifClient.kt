@@ -40,7 +40,7 @@ class OnvifClient(
     private val port: Int,
     private val user: String,
     private val pass: String,
-) {
+) : PtzMover {
     private val http = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
@@ -110,7 +110,7 @@ class OnvifClient(
     // ------------------------------------------------------------------ PTZ
 
     /** Speeds in -1..1. Camera keeps moving until stop() is sent. */
-    fun continuousMove(pan: Float, tilt: Float, zoom: Float) {
+    override fun continuousMove(pan: Float, tilt: Float, zoom: Float) {
         soap(
             ptzUrl,
             "<tptz:ContinuousMove xmlns:tptz=\"$NS_PTZ\" xmlns:tt=\"$NS_SCHEMA\">" +
@@ -120,7 +120,7 @@ class OnvifClient(
         )
     }
 
-    fun stop() {
+    override fun stop() {
         soap(
             ptzUrl,
             "<tptz:Stop xmlns:tptz=\"$NS_PTZ\"><tptz:ProfileToken>$profileToken</tptz:ProfileToken>" +

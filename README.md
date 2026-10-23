@@ -27,18 +27,28 @@ Recommended for a 30 km radio link (Video/Audio page):
 3. Connect the G20 to the PC with USB-C, select it in Android Studio, press Run.
    Or: Build → Build APK(s), copy app-debug.apk to the G20 and install it.
 
-## 3. Use (v2.0 – Tactical HUD interface)
+## 3. Use (v3.0 – two camera models)
 
-- Connect screen: LINK → ONVIF → VIDEO checks; disappears when video is live (SKIP / SETTINGS available).
-- Video is full-screen. Tap the video to show / hide the controls; they auto-hide after 4 s.
-- HUD: centre crosshair and zoom readout.
-- Status strip: link quality (green / amber / red), bitrate, REC timer, IR badge, battery, clock.
-- Swipe on the video = pan/tilt (further = faster, flick = burst). Pinch or the left ZOOM rocker = zoom.
-- Right rail: PRESETS (compass dial – tap = go, hold = save), NIGHT (hold = AUTO), WIPE, PHOTO, REC,
-  HOME (tap = go, hold = save), GALLERY, SETTINGS.
-- Recording: red frame pulses; MP4 files go to Movies/XeraCAM. Photos go to Pictures/XeraCAM.
-- Gallery: Photos / Videos tabs; tap = open, long-press = share / delete.
-- Gamepad: left stick pan/tilt, right stick zoom, LB/RB zoom, A = REC, X = PHOTO, Y = HOME, B = NIGHT.
+Choose the camera in Settings → CAMERA MODEL (dropdown). Each model keeps its own IP / ports / streams.
+
+### SHJ-TW10-IR (ONVIF)
+- Rail: PRESETS · NIGHT (hold = AUTO) · WIPE · PHOTO · REC · HOME (hold = save) · GALLERY · SETTINGS
+- Presets are stored in the camera: aim, then hold a preset on the dial to save.
+
+### SIYI ZT6 (SIYI SDK over UDP, default 192.168.144.25:37260)
+- Video: rtsp://192.168.144.25:8554/video1 (main), /video2 (second) – hold VIEW to switch streams.
+- Rail: PRESETS · VIEW (RGB / THERMAL / SPLIT) · PALETTE (11 thermal palettes) · PHOTO · REC ·
+  CENTER · MODE (LOCK / FOLLOW / FPV) · GALLERY · SETTINGS
+- HUD: live compass (F/R/B/L) and tilt scale from the gimbal's attitude; thermal ▲max ▼min °C in the status strip.
+- Presets work immediately: FRONT 0°, RIGHT 90°, REAR 180°, LEFT −90°, UP +25°, DOWN −90°.
+  Hold a preset to store the current angles instead. The app steers the gimbal there (closed loop).
+- REC records MP4 in the app AND (optional) on the gimbal SD card. PHOTO saves on the gimbal SD + a frame in the app.
+- Settings → "Show gimbal debug line" displays TX/RX packets for troubleshooting.
+
+### Common
+- Swipe = pan/tilt, pinch or ZOOM rocker = zoom, tap video = show/hide controls.
+- Gamepad: left stick pan/tilt, right stick zoom, LB/RB zoom, A = REC, X = PHOTO,
+  Y = HOME / CENTER, B = NIGHT / PALETTE.
 - Requires Android 10 or newer.
 
 Fonts: Rajdhani and JetBrains Mono (SIL Open Font License, see fonts-license/).

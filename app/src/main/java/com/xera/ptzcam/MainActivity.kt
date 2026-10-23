@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Bundle
@@ -30,6 +31,8 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.InputMethodManager
+import android.widget.AdapterView
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -37,6 +40,7 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.SeekBar
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -89,11 +93,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var zoomText: TextView
 
     private lateinit var railPresets: RailButton
-    private lateinit var railNight: RailButton
-    private lateinit var railWipe: RailButton
     private lateinit var railPhoto: RailButton
     private lateinit var railRec: RailButton
-    private lateinit var railHome: RailButton
+    // model-specific rail buttons (null when the current camera doesn't have them)
+    private var railNight: RailButton? = null
+    private var railWipe: RailButton? = null
+    private var railView: RailButton? = null
+    private var railPalette: RailButton? = null
+    private var railMode: RailButton? = null
+
+    private lateinit var modelText: TextView
+    private lateinit var tempText: TextView
+    private lateinit var debugText: TextView
 
     private lateinit var presetOverlay: View
     private lateinit var presetDial: PresetDialView
@@ -104,7 +115,7 @@ class MainActivity : AppCompatActivity() {
 
     private enum class Step { LINK, ONVIF, VIDEO }
     private enum class StepState { PENDING, ACTIVE, OK, FAIL }
-    private class StepRow(val icon: TextView, val progress: ProgressBar, val detail: TextView)
+    private class StepRow(val title: TextView, val icon: TextView, val progress: ProgressBar, val detail: TextView)
     private val steps = HashMap<Step, StepRow>()
 
     // ------------------------------------------------------------------ state
@@ -133,6 +144,16 @@ class MainActivity : AppCompatActivity() {
     private var recPulse: ObjectAnimator? = null
     private var photoBusy = false
     private var wiperOn = false
+
+    // camera drivers (only one is active, depending on the selected model)
+    private var onvif: OnvifClient? = null
+    private var siyi: SiyiClient? = null
+    private var siyiJob: Job? = null
+    private var aimJob: Job? = null
+    private var viewIndex = 0          // ZT6: 0 RGB, 1 thermal, 2 picture-in-picture
+    private var paletteIndex = 0
+    private var streamIndex = 0        // ZT6: 0 = first RTSP stream, 1 = second
+    private val debugLines = ArrayDeque<String>()
 
     /** Camera IR-cut state: "ON" = day, "OFF" = night, "AUTO", null = unknown. */
     private var irCut: String? = null
@@ -182,16 +203,20 @@ class MainActivity : AppCompatActivity() {
         setupSettingsSheet()
         setupConnectScreen()
 
+        hud.insetLeft = 80 * dp
+        hud.insetRight = 86 * dp
+        hud.insetTop = 54 * dp
+        applyModelUi()
         updateNightUi()
         updateLinkUi()
-        if (settings.pass.isEmpty()) ui.postDelayed({ openSettings() }, 400)
+        if (!settings.isSiyi && settings.pass.isEmpty()) ui.postDelayed({ openSettings() }, 400)
     }
 
     override fun onStart() {
         super.onStart()
         player.attachViews(videoLayout, null, false, false)
         ptz.start()
-        connectOnvif()
+        connectCamera()
         ui.post(statsTicker)
         scheduleHide()
     }
@@ -204,7 +229,10 @@ class MainActivity : AppCompatActivity() {
         ui.removeCallbacks(hideControls)
         onvifJob?.cancel()
         statusJob?.cancel()
+        siyiJob?.cancel()
+        aimJob?.cancel()
         ptz.halt()
+        closeSiyi()
         stopStream()
         player.detachViews()
     }
@@ -251,6 +279,9 @@ class MainActivity : AppCompatActivity() {
         batteryText = findViewById(R.id.batteryText)
         clockText = findViewById(R.id.clockText)
         hudMsg = findViewById(R.id.hudMsg)
+        modelText = findViewById(R.id.modelText)
+        tempText = findViewById(R.id.tempText)
+        debugText = findViewById(R.id.debugText)
         rail = findViewById(R.id.rail)
         zoomGroup = findViewById(R.id.zoomGroup)
         zoomText = findViewById(R.id.zoomText)
@@ -265,17 +296,43 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ rail
 
     private fun buildRail() {
+        rail.removeAllViews()
+        railNight = null; railWipe = null; railView = null; railPalette = null; railMode = null
         railPresets = railButton(R.drawable.ic_compass, "PRESETS", { openPresets() })
-        railNight = railButton(R.drawable.ic_moon, "NIGHT", { setNight(irCut != "OFF") }, { setNight(null) })
-        railWipe = railButton(R.drawable.ic_wiper, "WIPE", { setWiper(!wiperOn) })
+        if (settings.isSiyi) {
+            railView = railButton(R.drawable.ic_view, VIEW_LABELS[viewIndex], { cycleView() }, { switchStream() })
+            railPalette = railButton(R.drawable.ic_thermo, "PALETTE", { cyclePalette() })
+        } else {
+            railNight = railButton(R.drawable.ic_moon, "NIGHT", { setNight(irCut != "OFF") }, { setNight(null) })
+            railWipe = railButton(R.drawable.ic_wiper, "WIPE", { setWiper(!wiperOn) })
+        }
         railPhoto = railButton(R.drawable.ic_camera, "PHOTO", { takePhoto() })
         railRec = railButton(R.drawable.ic_record, "REC", { toggleRecord() })
         railRec.accent = ContextCompat.getColor(this, R.color.rec)
-        railHome = railButton(R.drawable.ic_home, "HOME", { goHome() }, { saveHome() })
+        if (settings.isSiyi) {
+            railButton(R.drawable.ic_center, "CENTER", { centerGimbal() })
+            railMode = railButton(R.drawable.ic_lock, MODE_LABELS[0], { cycleMotionMode() })
+        } else {
+            railButton(R.drawable.ic_home, "HOME", { goHome() }, { saveHome() })
+        }
         railButton(R.drawable.ic_gallery, "GALLERY", {
             startActivity(Intent(this, GalleryActivity::class.java))
         })
         railButton(R.drawable.ic_tune, "SETTINGS", { openSettings() })
+        updateNightUi()
+    }
+
+    /** Rail, HUD instruments, badges and connect-screen titles for the selected camera. */
+    private fun applyModelUi() {
+        buildRail()
+        hud.instruments = settings.isSiyi
+        hud.heading = null
+        hud.tilt = null
+        modelText.text = if (settings.isSiyi) "ZT6" else "SHJ-TW10"
+        tempText.visibility = View.GONE
+        debugText.visibility = if (settings.debug) View.VISIBLE else View.GONE
+        steps[Step.ONVIF]?.title?.text = if (settings.isSiyi) "GIMBAL" else "ONVIF"
+        zoomText.text = "1.0×"
     }
 
     private fun railButton(icon: Int, label: String, onClick: () -> Unit, onLong: (() -> Unit)? = null): RailButton {
@@ -347,8 +404,9 @@ class MainActivity : AppCompatActivity() {
     private fun setupConnectScreen() {
         fun row(id: Int, title: String): StepRow {
             val v = findViewById<View>(id)
-            v.findViewById<TextView>(R.id.stepTitle).text = title
-            return StepRow(v.findViewById(R.id.stepIcon), v.findViewById(R.id.stepProgress), v.findViewById(R.id.stepDetail))
+            val t = v.findViewById<TextView>(R.id.stepTitle)
+            t.text = title
+            return StepRow(t, v.findViewById(R.id.stepIcon), v.findViewById(R.id.stepProgress), v.findViewById(R.id.stepDetail))
         }
         steps[Step.LINK] = row(R.id.stepLink, "LINK")
         steps[Step.ONVIF] = row(R.id.stepOnvif, "ONVIF")
@@ -407,6 +465,10 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ ONVIF connection
 
+    private fun connectCamera() {
+        if (settings.isSiyi) connectSiyi() else connectOnvif()
+    }
+
     private fun connectOnvif() {
         onvifJob?.cancel()
         val s = settings
@@ -435,6 +497,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 val ok = result.getOrNull()
                 if (ok != null) {
+                    onvif = ok.first
                     ptz.client = ok.first
                     onvifRtsp = ok.second
                     setStep(Step.ONVIF, StepState.OK, "PTZ ready")
@@ -452,10 +515,226 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun client(): OnvifClient? {
-        val c = ptz.client
+        val c = onvif
         if (c == null) hudMessage("Camera not connected yet", error = true)
         return c
     }
+
+    private fun siyiClient(): SiyiClient? {
+        val c = siyi
+        if (c == null) hudMessage("Gimbal not connected yet", error = true)
+        return c
+    }
+
+    /** Runs a gimbal command off the UI thread; shows an error if it fails. */
+    private fun siyiCmd(ok: String? = null, block: (SiyiClient) -> Unit) {
+        val c = siyiClient() ?: return
+        lifecycleScope.launch {
+            val r = withContext(Dispatchers.IO) { runCatching { block(c) } }
+            if (r.isSuccess) {
+                if (ok != null) hudMessage(ok)
+            } else {
+                hudMessage("Gimbal: ${r.exceptionOrNull()?.message}", error = true)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ SIYI ZT6
+
+    private fun connectSiyi() {
+        onvifJob?.cancel()
+        val s = settings
+        onvifJob = lifecycleScope.launch {
+            while (isActive) {
+                setStep(Step.LINK, StepState.ACTIVE, "UDP ${s.host}:${s.port}")
+                val c = SiyiClient(s.host, s.port)
+                c.onFeedback = { msg -> runOnUiThread { hudMessage(msg) } }
+                c.onDebug = { line -> runOnUiThread { addDebug(line) } }
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { c.open(); c.handshake() }.getOrDefault(false)
+                }
+                if (!ok) {
+                    withContext(Dispatchers.IO) { c.close() }
+                    setStep(Step.LINK, StepState.FAIL, "No reply from ${s.host}:${s.port} – check IP / cable")
+                    if (!playerStarted) playStream()      // the video may still work
+                    delay(4000)
+                    continue
+                }
+                siyi = c
+                ptz.client = c
+                setStep(Step.LINK, StepState.OK, s.host)
+                setStep(Step.ONVIF, StepState.OK, "${c.modelName} ready")
+                if (!isLive) setStep(Step.VIDEO, StepState.ACTIVE, "Opening stream…")
+                if (!playerStarted) playStream()
+                startSiyiPolling(c)
+                return@launch
+            }
+        }
+    }
+
+    private fun closeSiyi() {
+        val c = siyi ?: return
+        siyi = null
+        if (ptz.client === c) ptz.client = null
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { c.stop() }
+            c.close()
+        }
+    }
+
+    /** Attitude at 10 Hz, thermal min/max stream, config; updates HUD + badges. */
+    private fun startSiyiPolling(c: SiyiClient) {
+        siyiJob?.cancel()
+        siyiJob = lifecycleScope.launch {
+            var tick = 0
+            while (isActive) {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        c.requestAttitude()
+                        if (tick % 30 == 0 && SystemClock.elapsedRealtime() - c.tempTime > 3000) c.requestThermalStream()
+                        if (tick % 20 == 5) c.requestConfig()
+                    }
+                }
+                val now = SystemClock.elapsedRealtime()
+                val att = c.attitude
+                if (att != null && now - c.attitudeTime < 1500) {
+                    hud.heading = wrap360(-att.yaw)          // SIYI yaw + = left → clockwise heading
+                    hud.tilt = att.pitch
+                } else {
+                    hud.heading = null
+                    hud.tilt = null
+                }
+                c.zoomX?.let { zoomText.text = String.format(Locale.US, "%.1f×", it) }
+                val tMax = c.tempMax
+                val tMin = c.tempMin
+                if (tMax != null && tMin != null && now - c.tempTime < 3000) {
+                    tempText.text = String.format(Locale.US, "▲%.1f° ▼%.1f°C", tMax, tMin)
+                    tempText.visibility = View.VISIBLE
+                } else {
+                    tempText.visibility = View.GONE
+                }
+                c.motionMode?.let { m -> railMode?.setLabel(MODE_LABELS.getOrElse(m) { "MODE" }) }
+                tick++
+                delay(100)
+            }
+        }
+    }
+
+    private fun wrap360(v: Float) = ((v % 360f) + 360f) % 360f
+
+    private fun centerGimbal() {
+        aimJob?.cancel()
+        siyiCmd("Gimbal centred") { it.center() }
+    }
+
+    private fun cycleView() {
+        viewIndex = (viewIndex + 1) % VIEW_TYPES.size
+        val type = VIEW_TYPES[viewIndex]
+        railView?.setLabel(VIEW_LABELS[viewIndex])
+        siyiCmd("View: ${VIEW_NAMES[viewIndex]}") { it.setImageType(type) }
+    }
+
+    /** Long-press VIEW: switch between the gimbal's two RTSP streams. */
+    private fun switchStream() {
+        if (settings.rtsp2.isBlank()) return hudMessage("Second stream URL not set (Settings)", error = true)
+        streamIndex = 1 - streamIndex
+        hudMessage("Stream ${streamIndex + 1}: ${currentStreamUrl()}")
+        if (wantPlaying) playStream()
+    }
+
+    private fun cyclePalette() {
+        paletteIndex = (paletteIndex + 1) % PALETTES.size
+        val (value, name) = PALETTES[paletteIndex]
+        siyiCmd("Palette: $name") { it.setPalette(value) }
+    }
+
+    private fun cycleMotionMode() {
+        val next = ((siyi?.motionMode ?: 0) + 1) % 3
+        railMode?.setLabel(MODE_LABELS[next])
+        siyiCmd("Gimbal mode: ${MODE_NAMES[next]}") { it.setMotionMode(next) }
+    }
+
+    private fun addDebug(line: String) {
+        if (!settings.debug) return
+        debugLines.addLast(line)
+        while (debugLines.size > 4) debugLines.removeFirst()
+        debugText.text = debugLines.joinToString("\n")
+    }
+
+    // ---------------- ZT6 presets: angles stored in the app, reached by closed-loop aiming
+
+    private fun siyiPresetKey(name: String) = "zt6_preset_$name"
+
+    /** Stored (heading°, pitch°) or the built-in default for that direction. */
+    private fun siyiPreset(name: String): Pair<Float, Float> {
+        val raw = prefs.getString(siyiPresetKey(name), null)
+        if (raw != null) {
+            val parts = raw.split(",")
+            val h = parts.getOrNull(0)?.toFloatOrNull()
+            val p = parts.getOrNull(1)?.toFloatOrNull()
+            if (h != null && p != null) return h to p
+        }
+        val curH = siyi?.attitude?.let { -it.yaw } ?: 0f
+        return when (name) {
+            "FRONT" -> 0f to 0f
+            "REAR" -> 180f to 0f
+            "LEFT" -> -90f to 0f
+            "RIGHT" -> 90f to 0f
+            "UP" -> curH to 25f
+            else -> curH to -90f          // DOWN
+        }
+    }
+
+    private fun gotoSiyiPreset(name: String) {
+        val c = siyiClient() ?: return
+        if (c.attitude == null) return hudMessage("No gimbal angle data yet", error = true)
+        closePresets()
+        val (targetH, targetP) = siyiPreset(name)
+        aimJob?.cancel()
+        aimJob = lifecycleScope.launch {
+            hudMessage("→ $name")
+            val start = SystemClock.elapsedRealtime()
+            var worst = Float.MAX_VALUE
+            try {
+                while (isActive) {
+                    if (ptz.manualActive) { hudMessage("Aiming cancelled"); break }
+                    val att = c.attitude ?: break
+                    val errH = targetH - (-att.yaw)            // degrees, + = turn right
+                    val errP = targetP - att.pitch             // degrees, + = tilt up
+                    val err = maxOf(abs(errH), abs(errP))
+                    if (err < 1.0f) { hudMessage("$name reached"); break }
+                    if (SystemClock.elapsedRealtime() - start > 12000) {
+                        hudMessage("$name: timed out", error = true); break
+                    }
+                    if (err < worst) worst = err
+                    if (err > worst + 25f) {                   // moving away → direction mismatch
+                        hudMessage("$name: gimbal moved the wrong way – stopped", error = true); break
+                    }
+                    ptz.autoPan = aimSpeed(errH)
+                    ptz.autoTilt = aimSpeed(errP)
+                    delay(100)
+                }
+            } finally {
+                ptz.autoPan = 0f
+                ptz.autoTilt = 0f
+            }
+        }
+    }
+
+    /** P-controller: 1.5 °/s per ° of error, 90 °/s = full speed, small minimum to beat the deadband. */
+    private fun aimSpeed(errDeg: Float): Float {
+        if (abs(errDeg) < 0.8f) return 0f
+        val v = (errDeg * 1.5f / 90f).coerceIn(-1f, 1f)
+        return if (abs(v) < 0.06f) 0.06f * kotlin.math.sign(v) else v
+    }
+
+    private fun saveSiyiPreset(name: String) {
+        val att = siyi?.attitude ?: return hudMessage("No gimbal angle data yet", error = true)
+        prefs.edit().putString(siyiPresetKey(name), "${-att.yaw},${att.pitch}").apply()
+        presetDial.saved = savedPresets()
+        hudMessage("$name saved")
+    }
+
 
     // ------------------------------------------------------------------ zoom readout
 
@@ -532,7 +811,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun presetToken(name: String): String? = prefs.getString("preset_$name", null)
 
-    private fun savedPresets(): Set<String> = PRESET_NAMES.filter { presetToken(it) != null }.toSet()
+    private fun savedPresets(): Set<String> =
+        if (settings.isSiyi) PRESET_NAMES.toSet()      // ZT6 directions work out of the box
+        else PRESET_NAMES.filter { presetToken(it) != null }.toSet()
 
     private fun setupPresetDial() {
         presetOverlay.setOnClickListener { closePresets() }
@@ -560,6 +841,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun gotoNamedPreset(name: String) {
+        if (settings.isSiyi) return gotoSiyiPreset(name)
         val token = presetToken(name)
             ?: return hudMessage("$name not set – aim the camera, then hold $name", error = true)
         val c = client() ?: return
@@ -571,6 +853,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveNamedPreset(name: String) {
+        if (settings.isSiyi) return saveSiyiPreset(name)
         val c = client() ?: return
         val token = presetToken(name) ?: DEFAULT_PRESET_TOKEN[name] ?: "20"
         lifecycleScope.launch {
@@ -617,8 +900,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateNightUi() {
-        railNight.isSelected = irCut == "OFF"
-        railNight.setLabel(if (irCut == "AUTO") "AUTO" else "NIGHT")
+        railNight?.isSelected = irCut == "OFF"
+        railNight?.setLabel(if (irCut == "AUTO") "AUTO" else "NIGHT")
         when (irCut) {
             "OFF" -> { nightBadge.text = "IR ON"; nightBadge.visibility = View.VISIBLE }
             "AUTO" -> { nightBadge.text = "IR AUTO"; nightBadge.visibility = View.VISIBLE }
@@ -631,10 +914,10 @@ class MainActivity : AppCompatActivity() {
     private val wiperAutoOff = Runnable { if (wiperOn) setWiper(false) }
 
     private fun setWiper(on: Boolean) {
-        val c = ptz.client ?: run {
+        val c = onvif ?: run {
             if (on) hudMessage("Camera not connected yet", error = true)
             wiperOn = false
-            railWipe.isSelected = false
+            railWipe?.isSelected = false
             return
         }
         val state = if (on) "on" else "off"
@@ -662,24 +945,24 @@ class MainActivity : AppCompatActivity() {
             when {
                 used == null && on -> {
                     wiperOn = false
-                    railWipe.isSelected = false
+                    railWipe?.isSelected = false
                     val list = c.auxCommands.ifEmpty { listOf("none reported") }.joinToString(", ")
                     hudMessage("Wiper refused · camera commands: $list", error = true)
                 }
                 used == "preset" -> {
                     wiperOn = false
-                    railWipe.isSelected = false
+                    railWipe?.isSelected = false
                     hudMessage("Wiper started")
                 }
                 on -> {
                     wiperOn = true
-                    railWipe.isSelected = true
+                    railWipe?.isSelected = true
                     ui.postDelayed(wiperAutoOff, WIPER_RUN_MS)
                     hudMessage("Wiper ON")
                 }
                 else -> {
                     wiperOn = false
-                    railWipe.isSelected = false
+                    railWipe?.isSelected = false
                 }
             }
         }
@@ -688,7 +971,7 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ video
 
     private fun playStream() {
-        val url = settings.rtspOverride.ifBlank { onvifRtsp ?: "" }
+        val url = currentStreamUrl()
         if (url.isBlank()) {
             setStep(Step.VIDEO, StepState.FAIL, "No RTSP URL – set one in Settings")
             return
@@ -704,7 +987,7 @@ class MainActivity : AppCompatActivity() {
             setHWDecoderEnabled(true, false)
             addOption(":network-caching=${settings.cachingMs}")
             if (settings.rtspTcp) addOption(":rtsp-tcp")
-            if (!url.contains("@")) {
+            if (!url.contains("@") && settings.user.isNotBlank()) {
                 addOption(":rtsp-user=${settings.user}")
                 addOption(":rtsp-pwd=${settings.pass}")
             }
@@ -723,6 +1006,10 @@ class MainActivity : AppCompatActivity() {
         media.release()
         player.play()
     }
+
+    private fun currentStreamUrl(): String =
+        if (settings.isSiyi && streamIndex == 1 && settings.rtsp2.isNotBlank()) settings.rtsp2
+        else settings.rtspOverride.ifBlank { onvifRtsp ?: "" }
 
     private fun stopStream() {
         wantPlaying = false
@@ -825,7 +1112,8 @@ class MainActivity : AppCompatActivity() {
         if (!isLive && ptz.client == null) return hudMessage("No camera connected", error = true)
         photoBusy = true
         shutter()
-        val c = ptz.client
+        siyi?.let { g -> lifecycleScope.launch(Dispatchers.IO) { runCatching { g.takePhoto() } } }
+        val c = onvif
         lifecycleScope.launch {
             val jpeg = if (c != null) withContext(Dispatchers.IO) { runCatching { c.snapshot() }.getOrNull() } else null
             if (jpeg != null) {
@@ -953,6 +1241,7 @@ class MainActivity : AppCompatActivity() {
         ui.removeCallbacks(recTicker)
         ui.post(recTicker)
         playStream()
+        setSdRecording(true)
         hudMessage("Recording started")
     }
 
@@ -967,6 +1256,7 @@ class MainActivity : AppCompatActivity() {
         recFrame.visibility = View.GONE
         ui.removeCallbacks(recTicker)
 
+        setSdRecording(false)
         val dir = recDir
         recDir = null
         // stopping the player closes the MP4 (writes index / duration)
@@ -978,6 +1268,20 @@ class MainActivity : AppCompatActivity() {
             val n = withContext(Dispatchers.IO) { exportToGallery(dir) }
             if (n > 0) hudMessage("Video saved to Movies/XeraCAM")
             else hudMessage("Recording was empty – video must be live while recording", error = true)
+        }
+    }
+
+    /** ZT6: mirror REC on the gimbal's own SD card (toggle only when state differs). */
+    private fun setSdRecording(on: Boolean) {
+        val c = siyi ?: return
+        if (!settings.sdRecord) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                c.requestConfig()
+                Thread.sleep(300)
+                val current = c.recordStatus == 1
+                if (current != on) c.toggleSdRecording()
+            }
         }
     }
 
@@ -1032,6 +1336,10 @@ class MainActivity : AppCompatActivity() {
     private var formTcp: CheckBox? = null
     private var formInvert: CheckBox? = null
     private var formSpeed: SeekBar? = null
+    private var formRtsp2: EditText? = null
+    private var formSd: CheckBox? = null
+    private var formDebug: CheckBox? = null
+    private var formModel: String = CamSettings.MODEL_SHJ
 
     private fun setupSettingsSheet() {
         settingsOverlay.setOnClickListener { closeSettings() }
@@ -1039,7 +1347,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.settingsSave).setOnClickListener { saveSettings() }
         findViewById<Button>(R.id.settingsClear).setOnClickListener {
             prefs.edit().apply {
-                PRESET_NAMES.forEach { remove("preset_$it") }
+                PRESET_NAMES.forEach { remove("preset_$it"); remove("zt6_preset_$it") }
                 remove("homeSaved")
             }.apply()
             presetDial.saved = emptySet()
@@ -1072,21 +1380,58 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun buildSettingsForm() {
-        val s = settings
+    /** Builds the side-sheet form for [model] (defaults to the current camera). */
+    private fun buildSettingsForm(model: String = settings.model) {
+        formModel = model
+        val s = if (model == settings.model) settings else CamSettings.loadFor(prefs, model)
+        val siyiModel = model == CamSettings.MODEL_ZT6
         settingsContent.removeAllViews()
 
+        section("CAMERA MODEL")
+        val spinner = Spinner(this)
+        spinner.adapter = ModelAdapter(CamSettings.MODELS)
+        spinner.setSelection(CamSettings.MODELS.indexOf(model).coerceAtLeast(0), false)
+        spinner.setBackgroundResource(R.drawable.field_bg)
+        spinner.setPopupBackgroundDrawable(ColorDrawable(0xFF0B111C.toInt()))
+        spinner.setPadding((4 * dp).toInt(), 0, (4 * dp).toInt(), 0)
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val m = CamSettings.MODELS[position]
+                if (m != formModel) settingsContent.post { buildSettingsForm(m) }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        settingsContent.addView(spinner, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (46 * dp).toInt()
+        ).apply { topMargin = (8 * dp).toInt() })
+        label(
+            if (siyiModel) "SIYI ZT6 · 4K + 640×512 thermal gimbal · SIYI SDK over UDP"
+            else "SHJ-TW10-IR · IR PTZ camera · ONVIF"
+        )
+
         section("CONNECTION")
-        formHost = field("Camera IP address", s.host, InputType.TYPE_CLASS_TEXT)
-        formPort = field("ONVIF port (camera HTTP port)", s.port.toString(), InputType.TYPE_CLASS_NUMBER)
-        formUser = field("Username", s.user, InputType.TYPE_CLASS_TEXT)
-        formPass = field("Password", s.pass, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+        formHost = field(if (siyiModel) "Gimbal IP address" else "Camera IP address", s.host, InputType.TYPE_CLASS_TEXT)
+        formPort = field(
+            if (siyiModel) "Gimbal control port (UDP, default 37260)" else "ONVIF port (camera HTTP port)",
+            s.port.toString(), InputType.TYPE_CLASS_NUMBER
+        )
+        if (siyiModel) {
+            formUser = null
+            formPass = null
+        } else {
+            formUser = field("Username", s.user, InputType.TYPE_CLASS_TEXT)
+            formPass = field("Password", s.pass, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+        }
 
         section("VIDEO")
         formRtsp = field(
-            "RTSP URL (empty = automatic from ONVIF)", s.rtspOverride,
+            if (siyiModel) "Main RTSP stream" else "RTSP URL (empty = automatic from ONVIF)", s.rtspOverride,
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         )
+        formRtsp2 = if (siyiModel) field(
+            "Second RTSP stream (hold VIEW to switch)", s.rtsp2,
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        ) else null
         formCache = field("Video buffer, ms (lower = less delay)", s.cachingMs.toString(), InputType.TYPE_CLASS_NUMBER)
         formTcp = check("RTSP over TCP (recommended on radio links)", s.rtspTcp)
 
@@ -1108,13 +1453,43 @@ class MainActivity : AppCompatActivity() {
         }
         speedLabel.text = "Max pan / tilt speed · ${formSpeed!!.progress.coerceAtLeast(10)} %"
         settingsContent.addView(formSpeed)
-        formZoom = field("Camera optical zoom (×) – for the zoom readout", s.maxZoom.toString(), InputType.TYPE_CLASS_NUMBER)
+        formZoom = if (siyiModel) null
+        else field("Camera optical zoom (×) – for the zoom readout", s.maxZoom.toString(), InputType.TYPE_CLASS_NUMBER)
 
-        section("WIPER")
-        formWiper = field("Wiper preset number (only if WIPE doesn't work)", s.wiperPreset, InputType.TYPE_CLASS_NUMBER)
+        if (siyiModel) {
+            section("GIMBAL")
+            formSd = check("Also record on the gimbal's SD card when REC is pressed", s.sdRecord)
+            formDebug = check("Show gimbal debug line (TX / RX packets)", s.debug)
+            formWiper = null
+        } else {
+            section("WIPER")
+            formWiper = field("Wiper preset number (only if WIPE doesn't work)", s.wiperPreset, InputType.TYPE_CLASS_NUMBER)
+            formSd = null
+            formDebug = null
+        }
 
         section("ABOUT")
-        label("XeraCAM ${versionName()} · ONVIF PTZ + RTSP · LibVLC")
+        label("XeraCAM ${versionName()} · SHJ-TW10-IR (ONVIF) · SIYI ZT6 (SIYI SDK) · LibVLC")
+    }
+
+    /** White-on-dark dropdown rows for the camera-model spinner. */
+    private inner class ModelAdapter(private val items: List<String>) : BaseAdapter() {
+        override fun getCount() = items.size
+        override fun getItem(position: Int) = items[position]
+        override fun getItemId(position: Int) = position.toLong()
+
+        private fun row(position: Int, dropDown: Boolean) = TextView(this@MainActivity).apply {
+            text = items[position]
+            typeface = fontBold
+            textSize = 16f
+            letterSpacing = 0.05f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+            val v = if (dropDown) 14 else 10
+            setPadding((12 * dp).toInt(), (v * dp).toInt(), (12 * dp).toInt(), (v * dp).toInt())
+        }
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View = row(position, false)
+        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup?): View = row(position, true)
     }
 
     private fun section(title: String) {
@@ -1172,18 +1547,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveSettings() {
+        val model = formModel
+        val siyiModel = model == CamSettings.MODEL_ZT6
+        val base = if (model == settings.model) settings else CamSettings.loadFor(prefs, model)
         settings = CamSettings(
+            model = model,
             host = formHost?.text?.toString()?.trim().orEmpty(),
-            port = formPort?.text?.toString()?.toIntOrNull() ?: 80,
-            user = formUser?.text?.toString()?.trim().orEmpty(),
-            pass = formPass?.text?.toString().orEmpty(),
+            port = formPort?.text?.toString()?.toIntOrNull() ?: (if (siyiModel) SiyiClient.DEFAULT_PORT else 80),
+            user = formUser?.text?.toString()?.trim() ?: base.user,
+            pass = formPass?.text?.toString() ?: base.pass,
             rtspOverride = formRtsp?.text?.toString()?.trim().orEmpty(),
+            rtsp2 = formRtsp2?.text?.toString()?.trim() ?: base.rtsp2,
             rtspTcp = formTcp?.isChecked ?: true,
             maxSpeed = (formSpeed?.progress ?: 100).coerceAtLeast(10) / 100f,
             cachingMs = (formCache?.text?.toString()?.toIntOrNull() ?: 200).coerceIn(50, 3000),
             swipeInvert = formInvert?.isChecked ?: false,
-            wiperPreset = formWiper?.text?.toString()?.trim().orEmpty(),
-            maxZoom = (formZoom?.text?.toString()?.toIntOrNull() ?: 30).coerceIn(1, 100),
+            wiperPreset = formWiper?.text?.toString()?.trim() ?: base.wiperPreset,
+            maxZoom = (formZoom?.text?.toString()?.toIntOrNull() ?: base.maxZoom).coerceIn(1, 100),
+            sdRecord = formSd?.isChecked ?: base.sdRecord,
+            debug = formDebug?.isChecked ?: base.debug,
         )
         settings.save(prefs)
         ptz.maxSpeed = settings.maxSpeed
@@ -1200,12 +1582,18 @@ class MainActivity : AppCompatActivity() {
         if (recording) stopRecording()
         stopStream()
         statusJob?.cancel()
+        siyiJob?.cancel()
+        aimJob?.cancel()
+        closeSiyi()
         ptz.client = null
+        onvif = null
         onvifRtsp = null
+        streamIndex = 0
         irCut = null
         updateNightUi()
+        applyModelUi()
         showConnectScreen()
-        connectOnvif()
+        connectCamera()
     }
 
     // ------------------------------------------------------------------ gamepad
@@ -1239,8 +1627,8 @@ class MainActivity : AppCompatActivity() {
                 KeyEvent.KEYCODE_BUTTON_L1 -> { ptz.buttonZoom = -ZOOM_SPEED; return true }
                 KeyEvent.KEYCODE_BUTTON_A -> { toggleRecord(); return true }
                 KeyEvent.KEYCODE_BUTTON_X -> { takePhoto(); return true }
-                KeyEvent.KEYCODE_BUTTON_Y -> { goHome(); return true }
-                KeyEvent.KEYCODE_BUTTON_B -> { setNight(irCut != "OFF"); return true }
+                KeyEvent.KEYCODE_BUTTON_Y -> { if (settings.isSiyi) centerGimbal() else goHome(); return true }
+                KeyEvent.KEYCODE_BUTTON_B -> { if (settings.isSiyi) cyclePalette() else setNight(irCut != "OFF"); return true }
             }
             hudMessage("Gamepad key: ${KeyEvent.keyCodeToString(keyCode).removePrefix("KEYCODE_")}")
         }
@@ -1283,6 +1671,18 @@ class MainActivity : AppCompatActivity() {
         private const val STALL_TICKS = 6
 
         private val PRESET_NAMES = listOf("FRONT", "REAR", "LEFT", "RIGHT", "UP", "DOWN")
+
+        // SIYI ZT6
+        private val VIEW_TYPES = intArrayOf(3, 7, 0)                 // RGB main, thermal main, PiP
+        private val VIEW_LABELS = listOf("RGB", "THERMAL", "SPLIT")
+        private val VIEW_NAMES = listOf("Visible (RGB)", "Thermal", "Split / picture-in-picture")
+        private val MODE_LABELS = listOf("LOCK", "FOLLOW", "FPV")
+        private val MODE_NAMES = listOf("Lock", "Follow", "FPV")
+        private val PALETTES = listOf(
+            0 to "White-hot", 10 to "Black-hot", 3 to "Ironbow", 4 to "Rainbow",
+            7 to "Red-hot", 9 to "Medical", 5 to "Night", 6 to "Aurora",
+            2 to "Sepia", 8 to "Jungle", 11 to "Glory-hot",
+        )
 
         /** Camera preset numbers for the named presets (avoid 32–99: special functions on many PTZs). */
         private val DEFAULT_PRESET_TOKEN = mapOf(
