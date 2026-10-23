@@ -68,6 +68,11 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
   RTSP session stays alive. UDP has slightly less delay but drops on lossy links.
 - If a live UDP stream drops twice within a minute, the app switches to TCP automatically and saves it.
 - Large 4K key frames (ZT6) get a 2 MB receive buffer so they are no longer truncated / corrupted.
+- v3.1.4: the stall watchdog no longer relies on LibVLC's input byte counter (always 0 for RTSP, which
+  caused "0 kbps" and a false "Video stalled – reconnecting…" every 6 s). It now watches playback time,
+  demuxed bytes and decoded/displayed frames, and only reconnects after 12 s with no video at all.
+  Late frames are shown instead of dropped, so the picture keeps up while the gimbal is moving, and
+  recordings are no longer cut into pieces by false reconnects.
 
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.

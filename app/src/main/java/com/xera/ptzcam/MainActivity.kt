@@ -138,10 +138,13 @@ class MainActivity : AppCompatActivity() {
     private var playerStarted = false
     private var wantPlaying = false
     private var isLive = false
-    private var lastBytes = -1
+    private var lastBytes = -1L
     private var lastBytesTime = 0L
-    private var zeroTicks = 0
+    private var lastFrames = -1L
+    private var zeroTicks = 0          // seconds without any sign of new video (for the WEAK badge)
     private var kbps = 0
+    /** Last time (elapsedRealtime) LibVLC showed the stream is moving. Written from the VLC thread. */
+    @Volatile private var lastProgressMs = 0L
 
     private var recording = false
     private var recDir: File? = null
@@ -203,12 +206,22 @@ class MainActivity : AppCompatActivity() {
 
         libVlc = LibVLC(
             this,
-            arrayListOf("--clock-jitter=0", "--clock-synchro=0", "--drop-late-frames", "--skip-frames")
+            arrayListOf(
+                "--clock-jitter=0", "--clock-synchro=0",
+                // Show every decoded frame. With a small buffer on a radio link, frames during a pan
+                // (bigger P-frames) arrive a little late and VLC used to throw them away, so the
+                // picture only updated every second or so while the gimbal moved.
+                "--no-drop-late-frames", "--no-skip-frames",
+            )
         )
         player = MediaPlayer(libVlc)
         player.setEventListener(MediaPlayer.EventListener { ev ->
-            val type = ev.type
-            runOnUiThread { onPlayerEvent(type) }
+            when (val type = ev.type) {
+                // fired continuously while frames are played – just a heartbeat, no UI work
+                MediaPlayer.Event.TimeChanged, MediaPlayer.Event.PositionChanged ->
+                    lastProgressMs = SystemClock.elapsedRealtime()
+                else -> runOnUiThread { onPlayerEvent(type) }
+            }
         })
 
         ptz = PtzController(lifecycleScope) { msg ->
@@ -1467,8 +1480,11 @@ class MainActivity : AppCompatActivity() {
         wantPlaying = true
         playerStarted = true
         isLive = false
-        lastBytes = -1
+        lastBytes = -1L
+        lastFrames = -1L
         zeroTicks = 0
+        kbps = 0
+        lastProgressMs = SystemClock.elapsedRealtime()
         updateLinkUi()
 
         val media = Media(libVlc, Uri.parse(url)).apply {
@@ -1539,9 +1555,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun onPlayerEvent(type: Int) {
         when (type) {
-            MediaPlayer.Event.Playing -> {
+            MediaPlayer.Event.Playing, MediaPlayer.Event.Vout -> {
+                if (type == MediaPlayer.Event.Vout && isLive) return
                 isLive = true
                 zeroTicks = 0
+                lastProgressMs = SystemClock.elapsedRealtime()
                 setStep(Step.VIDEO, StepState.OK, "Live")
                 ui.postDelayed({ if (isLive) hideConnectScreen() }, 700)
             }
@@ -1558,22 +1576,40 @@ class MainActivity : AppCompatActivity() {
         updateLinkUi()
     }
 
-    /** Every second: bitrate, link quality, stall watchdog, clock, battery. */
+    /**
+     * Every second: bitrate, link quality, stall watchdog, clock, battery.
+     *
+     * The old watchdog only looked at the input "read bytes" counter. For RTSP (live555) LibVLC
+     * leaves that counter at 0, so the bitrate showed "0 kbps" and every 6 s the app decided the
+     * video had stalled, stopped the player and reconnected – even though the picture was fine.
+     * That caused the jerky / slow picture and cut recordings into pieces.
+     * Now the stream counts as moving if ANY of these advance: playback time events, read or
+     * demuxed bytes, decoded or displayed frames. It is only restarted after [STALL_MS] of nothing.
+     */
     private val statsTicker = object : Runnable {
         override fun run() {
             if (wantPlaying && isLive) {
-                val m = player.media
-                val bytes = m?.stats?.readBytes ?: -1
-                m?.release()
                 val now = SystemClock.elapsedRealtime()
-                if (bytes >= 0 && lastBytes >= 0 && bytes >= lastBytes && now > lastBytesTime) {
-                    val delta = bytes - lastBytes
-                    kbps = (delta * 8.0 / ((now - lastBytesTime) / 1000.0) / 1000.0).toInt()
-                    zeroTicks = if (delta == 0) zeroTicks + 1 else 0
+                val m = player.media
+                val st = runCatching { m?.stats }.getOrNull()
+                m?.release()
+                if (st != null) {
+                    // bytes: input counter if LibVLC fills it, otherwise the demuxer counter
+                    val bytes = maxOf(st.readBytes.toLong(), st.demuxReadBytes.toLong())
+                    val frames = maxOf(st.displayedPictures.toLong(), st.decodedVideo.toLong())
+                    if (bytes > 0 && lastBytes >= 0 && bytes >= lastBytes && now > lastBytesTime) {
+                        val delta = bytes - lastBytes
+                        kbps = (delta * 8.0 / ((now - lastBytesTime) / 1000.0) / 1000.0).toInt()
+                        if (delta > 0) lastProgressMs = now
+                    }
+                    if (frames > 0 && lastFrames >= 0 && frames > lastFrames) lastProgressMs = now
+                    lastBytes = bytes
+                    lastFrames = frames
+                    lastBytesTime = now
                 }
-                lastBytes = bytes
-                lastBytesTime = now
-                if (zeroTicks >= STALL_TICKS) {
+                val idle = now - lastProgressMs
+                zeroTicks = if (idle >= WEAK_MS) (idle / 1000).toInt() else 0
+                if (idle >= STALL_MS) {
                     zeroTicks = 0
                     isLive = false
                     if (!noteVideoDrop()) {
@@ -1603,7 +1639,7 @@ class MainActivity : AppCompatActivity() {
         linkDot.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, colorRes))
         linkText.text = stateText
         bitrateText.text = when {
-            !isLive -> "— kbps"
+            !isLive || kbps <= 0 -> "— kbps"
             kbps >= 1000 -> String.format(Locale.US, "%.1f Mbps", kbps / 1000f)
             else -> "$kbps kbps"
         }
@@ -2448,7 +2484,8 @@ class MainActivity : AppCompatActivity() {
         private const val WIPER_RUN_MS = 6000L
         private const val MIN_VIDEO_BYTES = 50_000L
         private const val AUTO_HIDE_MS = 4000L
-        private const val STALL_TICKS = 6
+        private const val WEAK_MS = 2_500L          // no new video for this long → WEAK badge
+        private const val STALL_MS = 12_000L        // … and for this long → reconnect
         private const val RTSP_FRAME_BUFFER = 2_000_000
         private const val UDP_DROP_LIMIT = 2
         private const val UDP_DROP_WINDOW_MS = 60_000L
