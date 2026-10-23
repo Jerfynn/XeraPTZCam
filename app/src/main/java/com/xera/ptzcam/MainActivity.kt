@@ -145,6 +145,22 @@ class MainActivity : AppCompatActivity() {
     private var kbps = 0
     /** Last time (elapsedRealtime) LibVLC showed the stream is moving. Written from the VLC thread. */
     @Volatile private var lastProgressMs = 0L
+    /** Latency watchdog: smallest (wall clock − stream time) seen since the stream started. */
+    private var minClockOffset = Long.MAX_VALUE
+    private var playingSinceMs = 0L
+    private var lagTicks = 0
+    private var lastStreamTime = -1L
+
+    // joystick channels → pan / tilt / zoom
+    private var axisMap: MutableMap<AxisRole, AxisBinding> = mutableMapOf()
+    private var axisDead = AxisMapping.DEFAULT_DEADZONE
+    private val lastAxisValues = HashMap<Int, Float>()
+    private var lastJoyDevice = ""
+    private var axisLearner: AxisLearner? = null
+    private var axisMonitor: TextView? = null
+    private val axisLabels = LinkedHashMap<AxisRole, TextView>()
+    private var axisDeadLabel: TextView? = null
+    private var monitorUpdatedMs = 0L
 
     private var recording = false
     private var recDir: File? = null
@@ -202,16 +218,19 @@ class MainActivity : AppCompatActivity() {
 
         prefs = getSharedPreferences("cam", MODE_PRIVATE)
         settings = CamSettings.load(prefs)
+        axisMap = AxisMapping.load(prefs)
+        axisDead = AxisMapping.deadzone(prefs)
         bindViews()
 
         libVlc = LibVLC(
             this,
             arrayListOf(
+                // Low-latency playback: show frames as soon as they are decoded instead of
+                // scheduling them against a buffered clock. Late frames are dropped again (VLC's
+                // default) – keeping them made the delay grow while panning.
                 "--clock-jitter=0", "--clock-synchro=0",
-                // Show every decoded frame. With a small buffer on a radio link, frames during a pan
-                // (bigger P-frames) arrive a little late and VLC used to throw them away, so the
-                // picture only updated every second or so while the gimbal moved.
-                "--no-drop-late-frames", "--no-skip-frames",
+                "--drop-late-frames", "--skip-frames",
+                "--no-audio",               // no audio clock to wait for (the cameras send video only)
             )
         )
         player = MediaPlayer(libVlc)
@@ -1485,11 +1504,18 @@ class MainActivity : AppCompatActivity() {
         zeroTicks = 0
         kbps = 0
         lastProgressMs = SystemClock.elapsedRealtime()
+        minClockOffset = Long.MAX_VALUE
+        lagTicks = 0
+        lastStreamTime = -1L
         updateLinkUi()
 
         val media = Media(libVlc, Uri.parse(url)).apply {
             setHWDecoderEnabled(true, false)
             addOption(":network-caching=${settings.cachingMs}")
+            addOption(":live-caching=${settings.cachingMs}")
+            addOption(":clock-jitter=0")
+            addOption(":clock-synchro=0")
+            addOption(":no-audio")
             if (settings.rtspTcp) addOption(":rtsp-tcp")
             // live555's default 250 kB frame buffer truncates large 4K key frames (ZT6), which
             // corrupts the picture until the next key frame – give it room for 2 MB frames
@@ -1560,6 +1586,9 @@ class MainActivity : AppCompatActivity() {
                 isLive = true
                 zeroTicks = 0
                 lastProgressMs = SystemClock.elapsedRealtime()
+                playingSinceMs = lastProgressMs
+                minClockOffset = Long.MAX_VALUE
+                lagTicks = 0
                 setStep(Step.VIDEO, StepState.OK, "Live")
                 ui.postDelayed({ if (isLive) hideConnectScreen() }, 700)
             }
@@ -1609,6 +1638,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 val idle = now - lastProgressMs
                 zeroTicks = if (idle >= WEAK_MS) (idle / 1000).toInt() else 0
+                checkLatencyBuildUp(now)
                 if (idle >= STALL_MS) {
                     zeroTicks = 0
                     isLive = false
@@ -1626,6 +1656,33 @@ class MainActivity : AppCompatActivity() {
             clockText.text = clockFormat.format(Date())
             if (batteryTick++ % 10 == 0) updateBattery()
             ui.postDelayed(this, 1000)
+        }
+    }
+
+    /**
+     * Delay watchdog. If the radio link delivers the stream slower than real time for a while
+     * (e.g. the camera bitrate is higher than the link can carry), the backlog queues up in the
+     * TCP connection and the picture falls further and further behind – the gimbal then seems to
+     * react seconds late. Stream time advancing slower than the wall clock shows that backlog;
+     * once it exceeds [CATCHUP_LAG_MS] the stream is re-opened, which drops the backlog at once.
+     * Not done while recording (it would split the file) or during tracking.
+     */
+    private fun checkLatencyBuildUp(now: Long) {
+        if (!settings.autoCatchUp || recording || tracking.isRunning) { lagTicks = 0; return }
+        if (now - playingSinceMs < 3000) return                    // let the stream settle first
+        val t = player.time
+        if (t <= 0) return
+        if (t < lastStreamTime) minClockOffset = Long.MAX_VALUE   // timestamp jump: start over
+        lastStreamTime = t
+        val offset = now - t
+        if (offset < minClockOffset) minClockOffset = offset
+        val lag = offset - minClockOffset
+        lagTicks = if (lag > CATCHUP_LAG_MS) lagTicks + 1 else 0
+        if (lagTicks >= 3) {
+            lagTicks = 0
+            hudMessage(String.format(Locale.US, "Video delay built up (%.1f s) – resyncing", lag / 1000.0))
+            ui.removeCallbacks(retry)
+            playStream()
         }
     }
 
@@ -1884,6 +1941,7 @@ class MainActivity : AppCompatActivity() {
     private var formUser: EditText? = null
     private var formPass: EditText? = null
     private var formRtsp: EditText? = null
+    private var formCatchUp: CheckBox? = null
     private var formCache: EditText? = null
     private var formZoom: EditText? = null
     private var formWiper: EditText? = null
@@ -1930,6 +1988,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeSettings() {
         endCapture()
+        endAxisLearn()
+        axisMonitor = null
         currentFocus?.let {
             (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken, 0)
         }
@@ -1996,6 +2056,7 @@ class MainActivity : AppCompatActivity() {
         ) else null
         formCache = field("Video buffer, ms (lower = less delay)", s.cachingMs.toString(), InputType.TYPE_CLASS_NUMBER)
         formTcp = check("RTSP over TCP (recommended on radio links)", s.rtspTcp)
+        formCatchUp = check("Auto resync when the video delay builds up", s.autoCatchUp)
 
         section("CONTROL")
         formInvert = check("Invert swipe (drag the picture)", s.swipeInvert)
@@ -2094,6 +2155,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         buildMappingSection(model)
+        buildAxisSection()
 
         section("ABOUT")
         label("XeraCAM ${versionName()} · SHJ-TW10-IR (ONVIF) · SIYI ZT6 (SIYI SDK) · LibVLC")
@@ -2226,8 +2288,9 @@ class MainActivity : AppCompatActivity() {
             rtspOverride = formRtsp?.text?.toString()?.trim().orEmpty(),
             rtsp2 = formRtsp2?.text?.toString()?.trim() ?: base.rtsp2,
             rtspTcp = formTcp?.isChecked ?: true,
+            autoCatchUp = formCatchUp?.isChecked ?: base.autoCatchUp,
             maxSpeed = (formSpeed?.progress ?: 100).coerceAtLeast(10) / 100f,
-            cachingMs = (formCache?.text?.toString()?.toIntOrNull() ?: 200).coerceIn(50, 3000),
+            cachingMs = (formCache?.text?.toString()?.toIntOrNull() ?: CamSettings.DEFAULT_CACHE_MS).coerceIn(30, 3000),
             swipeInvert = formInvert?.isChecked ?: false,
             wiperPreset = formWiper?.text?.toString()?.trim() ?: base.wiperPreset,
             maxZoom = (formZoom?.text?.toString()?.toIntOrNull() ?: base.maxZoom).coerceIn(1, 100),
@@ -2275,23 +2338,28 @@ class MainActivity : AppCompatActivity() {
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         if (event.isFromSource(InputDevice.SOURCE_JOYSTICK) && event.action == MotionEvent.ACTION_MOVE) {
-            var x = axis(event, MotionEvent.AXIS_X)
-            var y = axis(event, MotionEvent.AXIS_Y)
+            lastJoyDevice = event.device?.name ?: "Joystick"
+            for (r in AxisMapping.joystickAxes(event.device)) lastAxisValues[r.axis] = event.getAxisValue(r.axis)
+            updateAxisMonitor(event)
+
+            // Settings → Joystick channels is waiting for a stick movement
+            axisLearner?.let { learner ->
+                learner.feed(event)?.let { b -> assignAxis(learner.role, b) }
+                return true
+            }
+
+            var x = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.PAN] ?: AxisBinding(-1, false)), axisDead)
+            var y = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.TILT] ?: AxisBinding(-1, false)), axisDead)
+            // D-pad (HAT) always works as a slow pan / tilt
             val hx = event.getAxisValue(MotionEvent.AXIS_HAT_X)
             val hy = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
-            if (hx != 0f || hy != 0f) { x = hx * 0.6f; y = hy * 0.6f }
-            ptz.padPan = shapeAxis(x)
-            ptz.padTilt = -shapeAxis(y)
-            ptz.padZoom = -shapeAxis(axis(event, MotionEvent.AXIS_RZ))
+            if (hx != 0f || hy != 0f) { x = shapeAxis(hx * 0.6f); y = -shapeAxis(hy * 0.6f) }
+            ptz.padPan = x
+            ptz.padTilt = y
+            ptz.padZoom = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.ZOOM] ?: AxisBinding(-1, false)), axisDead)
             return true
         }
         return super.onGenericMotionEvent(event)
-    }
-
-    private fun axis(e: MotionEvent, a: Int): Float {
-        val flat = e.device?.getMotionRange(a, e.source)?.flat ?: 0f
-        val v = e.getAxisValue(a)
-        return if (abs(v) > flat) v else 0f
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -2352,6 +2420,199 @@ class MainActivity : AppCompatActivity() {
             CamAction.MODE -> cycleMotionMode()
             CamAction.ZOOM_IN, CamAction.ZOOM_OUT -> Unit
         }
+    }
+
+    // ---------------- Settings → Joystick channels (pan / tilt / zoom)
+
+    private fun buildAxisSection() {
+        section("JOYSTICK CHANNELS")
+        label("Choose which joystick channel moves the gimbal. Tap LEARN, then move that stick. " +
+            "Works with any controller Android sees as a joystick (USB / Bluetooth gamepad, USB RC " +
+            "transmitter in joystick mode, or ground-station sticks reported to Android). Saved instantly.")
+        axisLabels.clear()
+        for (role in AxisRole.values()) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
+            }
+            row.addView(TextView(this).apply {
+                text = role.label
+                typeface = fontSemi
+                textSize = 14f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            val tv = TextView(this).apply {
+                typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
+                textSize = 11f
+                gravity = android.view.Gravity.CENTER
+                setPadding((8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt())
+                setBackgroundResource(R.drawable.glass_pill)
+            }
+            row.addView(tv, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = (6 * dp).toInt() })
+            row.addView(smallButton("LEARN") { beginAxisLearn(role) })
+            row.addView(smallButton("REV") {
+                val b = axisMap[role] ?: return@smallButton
+                if (!b.used) return@smallButton
+                axisMap[role] = b.copy(invert = !b.invert)
+                saveAxisMap()
+                hudMessage("${role.label}: direction reversed")
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (34 * dp).toInt()).apply {
+                marginStart = (6 * dp).toInt()
+            })
+            row.addView(smallButton("✕") {
+                axisMap[role] = AxisBinding(-1, false)
+                saveAxisMap()
+            }, LinearLayout.LayoutParams((40 * dp).toInt(), (34 * dp).toInt()).apply {
+                marginStart = (6 * dp).toInt()
+            })
+            axisLabels[role] = tv
+            settingsContent.addView(row)
+        }
+
+        // dead zone
+        val deadRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, (6 * dp).toInt(), 0, (4 * dp).toInt())
+        }
+        deadRow.addView(TextView(this).apply {
+            text = "Stick dead zone"
+            typeface = fontSemi
+            textSize = 14f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        deadRow.addView(smallButton("−") { changeDeadzone(-0.02f) },
+            LinearLayout.LayoutParams((40 * dp).toInt(), (34 * dp).toInt()))
+        axisDeadLabel = TextView(this).apply {
+            typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
+            textSize = 12f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.accent))
+        }
+        deadRow.addView(axisDeadLabel, LinearLayout.LayoutParams((56 * dp).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT))
+        deadRow.addView(smallButton("+") { changeDeadzone(0.02f) },
+            LinearLayout.LayoutParams((40 * dp).toInt(), (34 * dp).toInt()))
+        settingsContent.addView(deadRow)
+
+        // live channel monitor
+        label("Live channels – move a stick and watch which channel changes:")
+        axisMonitor = TextView(this).apply {
+            typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
+            textSize = 11f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+            setBackgroundResource(R.drawable.field_bg)
+            setPadding((10 * dp).toInt(), (8 * dp).toInt(), (10 * dp).toInt(), (8 * dp).toInt())
+            text = joystickListText()
+        }
+        settingsContent.addView(axisMonitor)
+
+        val reset = smallButton("RESET JOYSTICK CHANNELS") {
+            AxisMapping.reset(prefs)
+            axisMap = AxisMapping.load(prefs)
+            axisDead = AxisMapping.deadzone(prefs)
+            refreshAxisLabels()
+            hudMessage("Joystick channels reset (left stick X / Y, RZ zoom)")
+        }
+        settingsContent.addView(reset, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()
+        ).apply { topMargin = (8 * dp).toInt() })
+        refreshAxisLabels()
+    }
+
+    /** Joysticks currently connected (shown until the first stick movement arrives). */
+    private fun joystickListText(): String {
+        val names = InputDevice.getDeviceIds().toList().mapNotNull { InputDevice.getDevice(it) }
+            .filter { (it.sources and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK }
+            .map { d -> "${d.name}  (${AxisMapping.joystickAxes(d).size} channels)" }
+        return if (names.isEmpty())
+            "No joystick connected.\nIf the G20 sticks are not listed here, the controller sends\n" +
+                "them only over the radio link (SBUS), not to Android."
+        else "Connected:\n" + names.joinToString("\n") + "\n\nMove a stick…"
+    }
+
+    private fun updateAxisMonitor(e: MotionEvent) {
+        val tv = axisMonitor ?: return
+        if (settingsOverlay.visibility != View.VISIBLE) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - monitorUpdatedMs < 80) return
+        monitorUpdatedMs = now
+        val used = axisMap.entries.associate { it.value.axis to it.key }
+        val sb = StringBuilder(lastJoyDevice).append('\n')
+        for (r in AxisMapping.joystickAxes(e.device)) {
+            val v = e.getAxisValue(r.axis)
+            val frac = if (r.max > r.min) ((v - r.min) / (r.max - r.min)).coerceIn(0f, 1f) else 0.5f
+            val bar = CharArray(12) { if (it < (frac * 12).roundToInt()) '█' else '·' }
+            val role = used[r.axis]?.let { "  ← ${it.name}" } ?: ""
+            sb.append(String.format(Locale.US, "%-9s %+6.2f %s%s\n", AxisMapping.axisName(r.axis), v, String(bar), role))
+        }
+        tv.text = sb.toString().trimEnd()
+    }
+
+    private fun refreshAxisLabels() {
+        val accent = ContextCompat.getColor(this, R.color.accent)
+        val dim = ContextCompat.getColor(this, R.color.text_dim)
+        for ((role, tv) in axisLabels) {
+            if (axisLearner?.role == role) {
+                tv.text = "MOVE STICK…"
+                tv.setTextColor(accent)
+                continue
+            }
+            val b = axisMap[role]
+            if (b == null || !b.used) {
+                tv.text = "—"
+                tv.setTextColor(dim)
+            } else {
+                tv.text = AxisMapping.axisName(b.axis) + if (b.invert) " ⇅" else ""
+                tv.setTextColor(accent)
+            }
+        }
+        axisDeadLabel?.text = "${(axisDead * 100).roundToInt()} %"
+    }
+
+    private fun beginAxisLearn(role: AxisRole) {
+        currentFocus?.clearFocus()
+        ptz.padPan = 0f; ptz.padTilt = 0f; ptz.padZoom = 0f
+        axisLearner = AxisLearner(role).apply { seed(lastAxisValues) }
+        refreshAxisLabels()
+        hudMessage("${role.label}: release all sticks, then ${role.learnHint}")
+        ui.removeCallbacks(axisLearnTimeout)
+        ui.postDelayed(axisLearnTimeout, 10_000)
+    }
+
+    private val axisLearnTimeout = Runnable {
+        if (axisLearner != null) {
+            endAxisLearn()
+            hudMessage("No stick movement detected – is the joystick listed under Live channels?", error = true)
+        }
+    }
+
+    private fun endAxisLearn() {
+        axisLearner = null
+        ui.removeCallbacks(axisLearnTimeout)
+        if (axisLabels.isNotEmpty()) refreshAxisLabels()
+    }
+
+    private fun assignAxis(role: AxisRole, b: AxisBinding) {
+        // one channel drives one role
+        for (r in AxisRole.values()) if (r != role && axisMap[r]?.axis == b.axis) axisMap[r] = AxisBinding(-1, false)
+        axisMap[role] = b
+        endAxisLearn()
+        saveAxisMap()
+        hudMessage("${AxisMapping.axisName(b.axis)} → ${role.label}")
+    }
+
+    private fun saveAxisMap() {
+        AxisMapping.save(prefs, axisMap)
+        refreshAxisLabels()
+    }
+
+    private fun changeDeadzone(d: Float) {
+        axisDead = (axisDead + d).coerceIn(0f, 0.5f)
+        AxisMapping.setDeadzone(prefs, axisDead)
+        refreshAxisLabels()
     }
 
     // ---------------- Settings → Button mapping
@@ -2486,6 +2747,7 @@ class MainActivity : AppCompatActivity() {
         private const val AUTO_HIDE_MS = 4000L
         private const val WEAK_MS = 2_500L          // no new video for this long → WEAK badge
         private const val STALL_MS = 12_000L        // … and for this long → reconnect
+        private const val CATCHUP_LAG_MS = 1_200L   // video this far behind live → resync
         private const val RTSP_FRAME_BUFFER = 2_000_000
         private const val UDP_DROP_LIMIT = 2
         private const val UDP_DROP_WINDOW_MS = 60_000L

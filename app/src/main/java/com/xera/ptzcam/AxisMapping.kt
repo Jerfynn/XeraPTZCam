@@ -1,0 +1,134 @@
+package com.xera.ptzcam
+
+import android.content.SharedPreferences
+import android.view.InputDevice
+import android.view.MotionEvent
+import kotlin.math.abs
+
+/** What a joystick channel (axis) can drive. */
+enum class AxisRole(val label: String, val learnHint: String) {
+    PAN("Pan (horizontal)", "push the stick fully RIGHT"),
+    TILT("Tilt (vertical)", "push the stick fully UP"),
+    ZOOM("Zoom", "push the stick/slider towards ZOOM IN"),
+}
+
+/**
+ * One joystick channel bound to a role.
+ * [axis] is an Android MotionEvent axis (AXIS_X, AXIS_RZ, AXIS_GENERIC_1 …), -1 = not used.
+ * [center] is the value the channel reports at rest (NaN = middle of the channel's range).
+ */
+data class AxisBinding(val axis: Int, val invert: Boolean, val center: Float = Float.NaN) {
+    val used get() = axis >= 0
+}
+
+/**
+ * Maps joystick channels to pan / tilt / zoom. Works with anything Android sees as a joystick:
+ * USB / Bluetooth gamepads, USB RC transmitters in joystick mode, and controller sticks the
+ * ground station reports to Android. Stored globally (the same sticks drive every camera model).
+ */
+object AxisMapping {
+    private const val PREF = "axismap_v1"
+    private const val PREF_DEAD = "axis_dead"
+    const val DEFAULT_DEADZONE = 0.08f
+
+    fun defaults(): Map<AxisRole, AxisBinding> = linkedMapOf(
+        AxisRole.PAN to AxisBinding(MotionEvent.AXIS_X, invert = false),
+        AxisRole.TILT to AxisBinding(MotionEvent.AXIS_Y, invert = true),     // stick up = negative Y
+        AxisRole.ZOOM to AxisBinding(MotionEvent.AXIS_RZ, invert = true),
+    )
+
+    fun load(p: SharedPreferences): MutableMap<AxisRole, AxisBinding> {
+        val out = defaults().toMutableMap()
+        val raw = p.getString(PREF, null) ?: return out
+        for (part in raw.split(';')) {
+            val f = part.split(':')
+            if (f.size < 3) continue
+            val role = runCatching { AxisRole.valueOf(f[0]) }.getOrNull() ?: continue
+            val axis = f[1].toIntOrNull() ?: continue
+            val inv = f[2] == "1"
+            val center = f.getOrNull(3)?.toFloatOrNull() ?: Float.NaN
+            out[role] = AxisBinding(axis, inv, center)
+        }
+        return out
+    }
+
+    fun save(p: SharedPreferences, map: Map<AxisRole, AxisBinding>) {
+        val raw = map.entries.joinToString(";") { (r, b) ->
+            "${r.name}:${b.axis}:${if (b.invert) 1 else 0}:${if (b.center.isNaN()) "" else b.center}"
+        }
+        p.edit().putString(PREF, raw).apply()
+    }
+
+    fun reset(p: SharedPreferences) {
+        p.edit().remove(PREF).remove(PREF_DEAD).apply()
+    }
+
+    fun deadzone(p: SharedPreferences) = p.getFloat(PREF_DEAD, DEFAULT_DEADZONE)
+    fun setDeadzone(p: SharedPreferences, v: Float) = p.edit().putFloat(PREF_DEAD, v.coerceIn(0f, 0.5f)).apply()
+
+    fun axisName(axis: Int): String {
+        if (axis < 0) return "—"
+        val n = MotionEvent.axisToString(axis) ?: return "AXIS $axis"
+        return n.removePrefix("AXIS_").replace("GENERIC_", "CH ")
+    }
+
+    /** All axes the device exposes as joystick axes. */
+    fun joystickAxes(dev: InputDevice?): List<InputDevice.MotionRange> =
+        dev?.motionRanges?.filter { it.isFromSource(InputDevice.SOURCE_CLASS_JOYSTICK) } ?: emptyList()
+
+    /**
+     * Channel value of [b] in [e], normalised to -1 … +1 around its rest value, with inversion.
+     * Returns 0 if the axis is not present on this device.
+     */
+    fun value(e: MotionEvent, b: AxisBinding): Float {
+        if (!b.used) return 0f
+        val range = e.device?.getMotionRange(b.axis, e.source) ?: return 0f
+        val v = e.getAxisValue(b.axis)
+        val min = range.min
+        val max = range.max
+        val c = if (b.center.isNaN()) (min + max) / 2f else b.center
+        var n = when {
+            v >= c && max - c > 1e-4f -> (v - c) / (max - c)
+            v < c && c - min > 1e-4f -> (v - c) / (c - min)
+            else -> 0f
+        }
+        if (abs(v - c) <= range.flat) n = 0f
+        n = n.coerceIn(-1f, 1f)
+        return if (b.invert) -n else n
+    }
+}
+
+/**
+ * "LEARN" helper: remembers each axis value at rest, then picks the channel that moves the most.
+ * The direction the user was asked to push decides inversion automatically.
+ */
+class AxisLearner(val role: AxisRole) {
+    private val rest = HashMap<Int, Float>()
+    private val ranges = HashMap<Int, Float>()
+
+    /** Seeds rest values from the last known state of every axis (stick released). */
+    fun seed(lastValues: Map<Int, Float>) {
+        rest.putAll(lastValues)
+    }
+
+    /** Returns a binding once one channel has clearly been pushed, else null. */
+    fun feed(e: MotionEvent): AxisBinding? {
+        var best = -1
+        var bestFrac = 0f
+        var bestDelta = 0f
+        for (r in AxisMapping.joystickAxes(e.device)) {
+            val a = r.axis
+            val v = e.getAxisValue(a)
+            val base = rest.getOrPut(a) { v }
+            val half = ((r.max - r.min) / 2f).coerceAtLeast(1e-4f)
+            ranges[a] = half
+            val frac = abs(v - base) / half
+            if (frac > bestFrac) { bestFrac = frac; best = a; bestDelta = v - base }
+        }
+        if (best < 0 || bestFrac < 0.45f) return null
+        // HAT axes are D-pads: they stay fixed to the D-pad, never learned as a stick channel
+        if (best == MotionEvent.AXIS_HAT_X || best == MotionEvent.AXIS_HAT_Y) return null
+        val center = rest[best] ?: 0f
+        return AxisBinding(best, invert = bestDelta < 0, center = center)
+    }
+}

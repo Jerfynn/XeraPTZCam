@@ -74,6 +74,24 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
   Late frames are shown instead of dropped, so the picture keeps up while the gimbal is moving, and
   recordings are no longer cut into pieces by false reconnects.
 
+### Low latency (v3.1.5)
+- Video buffer default lowered to 100 ms (Settings → Video buffer; 50–80 ms on a clean link, 150+ if it stutters).
+- Frames are shown the moment they are decoded; late frames are dropped so the delay cannot grow.
+- "Auto resync when the video delay builds up" (on by default): if the picture falls more than ~1.2 s
+  behind live (backlog on the radio link), the stream is re-opened to catch up. Skipped while recording
+  or tracking.
+- Biggest remaining factor is the camera bitrate vs. the radio link: use 1080p / the second stream,
+  2–4 Mbps, and a short I-frame interval for the lowest delay.
+
+### Joystick channels (v3.1.5)
+- Settings → JOYSTICK CHANNELS: assign any joystick channel to Pan (horizontal), Tilt (vertical) and Zoom.
+- Tap LEARN, release the sticks, then push the stick the way the hint says (RIGHT for pan, UP for tilt,
+  towards zoom-in for zoom). Channel and direction are detected automatically. REV flips direction,
+  ✕ disables a role, dead zone is adjustable. Defaults: X = pan, Y = tilt, RZ = zoom; the D-pad always pans/tilts.
+- "Live channels" shows every connected joystick and all its channels moving in real time.
+- Only controllers Android sees as a joystick appear there. If the G20's own sticks are not listed,
+  they go only over the radio link (SBUS), not to Android.
+
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.
 - Requires Android 10 or newer.

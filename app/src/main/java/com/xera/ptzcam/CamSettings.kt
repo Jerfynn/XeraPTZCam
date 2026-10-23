@@ -17,6 +17,8 @@ data class CamSettings(
     val rtspTcp: Boolean,
     val maxSpeed: Float,
     val cachingMs: Int,
+    /** Re-open the stream when the picture falls behind live (backlog on the radio link). */
+    val autoCatchUp: Boolean = true,
     val swipeInvert: Boolean = false,
     val wiperPreset: String = "",
     val maxZoom: Int = 30,
@@ -52,6 +54,8 @@ data class CamSettings(
             .putBoolean("tcp", rtspTcp)
             .putFloat("speed", maxSpeed)
             .putInt("cache", cachingMs)
+            .putInt("cacheVer", 2)
+            .putBoolean("catchUp", autoCatchUp)
             .putBoolean("swipeInv", swipeInvert)
             .putBoolean("sdRecord", sdRecord)
             .putBoolean("debug", debug)
@@ -69,6 +73,7 @@ data class CamSettings(
         const val MODEL_ZT6 = "SIYI ZT6"
         val MODELS = listOf(MODEL_SHJ, MODEL_ZT6)
         const val DEFAULT_PATROL = "FRONT,RIGHT,REAR,LEFT"
+        const val DEFAULT_CACHE_MS = 100
 
         private fun prefix(model: String) = if (model == MODEL_ZT6) "zt6_" else ""
 
@@ -89,7 +94,11 @@ data class CamSettings(
                 rtsp2 = p.getString(pre + "rtsp2", if (siyi) "rtsp://$defHost:8554/video2" else "") ?: "",
                 rtspTcp = p.getBoolean("tcp", true),
                 maxSpeed = p.getFloat("speed", 1f),
-                cachingMs = p.getInt("cache", 200),
+                // v3.1.5: default buffer lowered 200 → 100 ms; an old saved default of 200 is migrated
+                cachingMs = p.getInt("cache", DEFAULT_CACHE_MS).let {
+                    if (p.getInt("cacheVer", 1) < 2 && it == 200) DEFAULT_CACHE_MS else it
+                },
+                autoCatchUp = p.getBoolean("catchUp", true),
                 swipeInvert = p.getBoolean("swipeInv", false),
                 wiperPreset = p.getString("wiperPreset", "") ?: "",
                 maxZoom = p.getInt(pre + "maxZoom", if (siyi) 6 else 30),
