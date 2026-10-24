@@ -2582,6 +2582,23 @@ class MainActivity : AppCompatActivity() {
         refreshAxisLabels()
     }
 
+    private fun smallButton(text: String, onClick: () -> Unit) = Button(this).apply {
+        this.text = text
+        typeface = fontBold
+        textSize = 12f
+        letterSpacing = 0.06f
+        minWidth = 0
+        minHeight = 0
+        minimumWidth = 0
+        minimumHeight = 0
+        setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), 0)
+        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+        setBackgroundResource(R.drawable.btn_secondary)
+        stateListAnimator = null
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (34 * dp).toInt())
+        setOnClickListener { it.tick(); onClick() }
+    }
+
     // ------------------------------------------------------------------ misc
 
     private fun hideSystemBars() {
