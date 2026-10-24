@@ -61,6 +61,10 @@ class OnvifClient(
     @Volatile var cameraClockSynced: Boolean = false
         private set
 
+    /** Human-readable result of setting and then reading back the camera clock. */
+    @Volatile var cameraClockStatus: String = "Camera clock not checked"
+        private set
+
     /** Auxiliary commands the camera reports (e.g. "tt:Wiper|On"). Filled by connect(). */
     var auxCommands: List<String> = emptyList()
         private set
@@ -243,29 +247,44 @@ class OnvifClient(
 
     /** WS-Security timestamps must match the camera clock, so measure the offset first. */
     private fun syncClock() {
-        val measuredOffset = runCatching {
-            val r = String(
-                request(deviceUrl, { envelope("<tds:GetSystemDateAndTime xmlns:tds=\"$NS_DEVICE\"/>", secure = false) }),
-                Charsets.UTF_8
-            )
-            val utc = r.substringAfter("UTCDateTime", "")
-            fun v(tag: String) = Regex("<(?:\\w+:)?$tag>(\\d+)<").find(utc)?.groupValues?.get(1)?.toInt()
-                ?: throw OnvifException("camera returned no system time")
-            val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
-            cal.clear()
-            cal.set(v("Year"), v("Month") - 1, v("Day"), v("Hour"), v("Minute"), v("Second"))
-            cal.timeInMillis - System.currentTimeMillis()
-        }
-        measuredOffset.getOrNull()?.let { clockOffsetMs = it }
-
-        cameraClockSynced = try {
+        try {
+            readCameraUtcMillis()?.let { clockOffsetMs = it - System.currentTimeMillis() }
             setSystemDateAndTimeFromDevice()
+            val readBack = readCameraUtcMillis()
+                ?: throw OnvifException("camera returned no time after setting it")
+            val differenceMs = readBack - System.currentTimeMillis()
+            if (kotlin.math.abs(differenceMs) > CLOCK_SYNC_TOLERANCE_MS) {
+                throw OnvifException("camera clock still differs by ${kotlin.math.abs(differenceMs) / 1000}s")
+            }
             clockOffsetMs = 0L
-            true
-        } catch (_: Exception) {
+            cameraClockSynced = true
+            cameraClockStatus = "G20 time confirmed"
+        } catch (e: Exception) {
             // Some cameras expose ONVIF reads but reject clock changes; keep streaming/control working.
-            false
+            cameraClockSynced = false
+            cameraClockStatus = (e.message ?: "camera rejected the time update")
+                .replace(Regex("\\s+"), " ").take(96)
         }
+    }
+
+    /** Reads the UTC clock fields from ONVIF and converts them into epoch milliseconds. */
+    private fun readCameraUtcMillis(): Long? {
+        val r = String(
+            request(deviceUrl, { envelope("<tds:GetSystemDateAndTime xmlns:tds=\"$NS_DEVICE\"/>", secure = false) }),
+            Charsets.UTF_8
+        )
+        val utc = r.substringAfter("UTCDateTime", "")
+        fun v(tag: String): Int? = Regex("<(?:\\w+:)?$tag>(\\d+)<").find(utc)?.groupValues?.get(1)?.toIntOrNull()
+        val year = v("Year") ?: return null
+        val month = v("Month") ?: return null
+        val day = v("Day") ?: return null
+        val hour = v("Hour") ?: return null
+        val minute = v("Minute") ?: return null
+        val second = v("Second") ?: return null
+        return Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(year, month - 1, day, hour, minute, second)
+        }.timeInMillis
     }
 
     /** Set the camera's embedded OSD clock to the G20's clock and current local timezone. */
@@ -418,6 +437,7 @@ class OnvifClient(
         .replace("\"", "&quot;").replace("'", "&apos;")
 
     companion object {
+        private const val CLOCK_SYNC_TOLERANCE_MS = 10_000L
         private val SOAP_TYPE = "application/soap+xml; charset=utf-8".toMediaType()
         private const val NS_SOAP = "http://www.w3.org/2003/05/soap-envelope"
         private const val NS_DEVICE = "http://www.onvif.org/ver10/device/wsdl"

@@ -645,7 +645,7 @@ class MainActivity : AppCompatActivity() {
                     onvifRtsp = ok.second
                     setStep(
                         Step.ONVIF, StepState.OK,
-                        if (ok.first.cameraClockSynced) "PTZ ready · G20 time synced" else "PTZ ready · camera time unchanged",
+                        "PTZ ready · ${ok.first.cameraClockStatus}",
                     )
                     if (!isLive) setStep(Step.VIDEO, StepState.ACTIVE, "Opening stream…")
                     if (!playerStarted) playStream()
