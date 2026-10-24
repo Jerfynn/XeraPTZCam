@@ -11,8 +11,8 @@ android {
         applicationId = "com.xera.ptzcam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 16
-        versionName = "3.1.8"
+        versionCode = 17
+        versionName = "3.1.9"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
@@ -27,6 +27,7 @@ android {
 }
 
 dependencies {
+    implementation(files("libs/rcsdk-v1.9.2.aar"))
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")

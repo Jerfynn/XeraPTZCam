@@ -92,11 +92,9 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 ### Joystick movement
 - Settings → JOYSTICK MOVEMENT has four learnable directions: left, right, up, and down. Tap LEARN,
   release the stick, then push it in the shown direction. Reverse and clear controls are available for each.
-- Opposite directions can share the same analog axis. The live channel monitor shows whether Android
-  receives the controller axes. The default mapping uses X for left/right and Y for up/down.
-- The G20's built-in sticks only work here if Skydroid exposes them to Android as joystick axes. If the
-  live monitor says no axes are received, the sticks are being sent over the radio link (SBUS) and the
-  app cannot read them without a Skydroid input API or another data connection.
+- On a Skydroid G20, the app reads the built-in sticks through Skydroid RCSDK. Open settings and use
+  LEARN once for each direction; the live channel monitor shows the RCSDK channel values.
+- On other Android devices, standard Android joystick axes remain supported.
 
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.
@@ -106,9 +104,7 @@ Fonts: Rajdhani and JetBrains Mono (SIL Open Font License, see fonts-license/).
 
 ## Notes
 
-- The G20's physical sticks/wheel are sent over Skydroid's RC link to the GR01's SBUS/PWM output,
-  not to Android, so the app uses the on-screen stick or a gamepad. To use the G20's own gimbal
-  wheel, either ask Skydroid for their SDK, or read the GR01 SBUS output with a Teensy/ESP32 and
-  drive the camera's RS485 input with Pelco-D.
+- The G20 built-in sticks are read using Skydroid RCSDK 1.9.2. Close other Skydroid apps that use
+  the controller connection if the live RCSDK channel monitor stays empty.
 - If recording reports "not available", change libvlc-all in app/build.gradle.kts to 3.6.0 and rebuild,
   or record on the camera's SD card (Storage menu).

@@ -50,6 +50,13 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import com.skydroid.rcsdk.KeyManager
+import com.skydroid.rcsdk.RCSDKManager
+import com.skydroid.rcsdk.SDKManagerCallBack
+import com.skydroid.rcsdk.common.callback.CompletionCallbackWith
+import com.skydroid.rcsdk.common.error.SkyException
+import com.skydroid.rcsdk.common.remotecontroller.ChannelSettings
+import com.skydroid.rcsdk.key.RemoteControllerKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -68,6 +75,7 @@ import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.math.abs
 import kotlin.math.atan
@@ -160,6 +168,16 @@ class MainActivity : AppCompatActivity() {
     private val axisLabels = LinkedHashMap<AxisRole, TextView>()
     private var axisDeadLabel: TextView? = null
     private var monitorUpdatedMs = 0L
+    // G20 sticks are read through Skydroid RCSDK (they are not Android joystick MotionEvents).
+    private var rcSdkInitialized = false
+    @Volatile private var rcConnected = false
+    private val rcRequestInFlight = AtomicBoolean(false)
+    @Volatile private var rcChannels = IntArray(0)
+    @Volatile private var rcMins = IntArray(16) { 0 }
+    @Volatile private var rcMiddles = IntArray(16) { 500 }
+    @Volatile private var rcMaxes = IntArray(16) { 1000 }
+    @Volatile private var activityResumed = false
+    @Volatile private var lastRcUpdateMs = 0L
 
     private var recording = false
     private var recDir: File? = null
@@ -243,6 +261,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { if (msg != "ready") hudMessage("PTZ: $msg", error = true) }
         }
         ptz.maxSpeed = settings.maxSpeed
+        initSkydroidRcSdk()
 
         // gestures on the video
         swipePad.invert = settings.swipeInvert
@@ -325,6 +344,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         ui.removeCallbacksAndMessages(null)
+        rcConnected = false
+        if (rcSdkInitialized) RCSDKManager.disconnectRC()
         recPulse?.cancel()
         player.setEventListener(null)
         player.release()
@@ -2391,12 +2412,110 @@ class MainActivity : AppCompatActivity() {
         return super.onGenericMotionEvent(event)
     }
 
+    private fun initSkydroidRcSdk() {
+        if (rcSdkInitialized) return
+        rcSdkInitialized = true
+        RCSDKManager.initSDK(this, object : SDKManagerCallBack {
+            override fun onRcConnected() {
+                rcConnected = true
+                KeyManager.get(RemoteControllerKey.KeyChannelSettings, object : CompletionCallbackWith<ChannelSettings> {
+                    override fun onSuccess(value: ChannelSettings?) {
+                        value?.channels?.forEachIndexed { i, channel ->
+                            if (i in rcMins.indices) {
+                                rcMins[i] = channel.min
+                                rcMiddles[i] = channel.middle
+                                rcMaxes[i] = channel.max
+                            }
+                        }
+                    }
+                    override fun onFailure(e: SkyException) { /* The documented defaults remain usable. */ }
+                })
+            }
+            override fun onRcConnectFail(e: SkyException?) { rcConnected = false }
+            override fun onRcDisconnect() { rcConnected = false; if (::ptz.isInitialized) clearRcControl() }
+        })
+        RCSDKManager.setMainThreadCallBack(true)
+        RCSDKManager.connectToRC()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        activityResumed = true
+        ui.removeCallbacks(rcPoll)
+        ui.post(rcPoll)
+    }
+
+    override fun onPause() {
+        activityResumed = false
+        ui.removeCallbacks(rcPoll)
+        clearRcControl()
+        super.onPause()
+    }
+
+    private val rcPoll = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed || !activityResumed) return
+            if (SystemClock.elapsedRealtime() - lastRcUpdateMs > 450L) clearRcControl()
+            if (rcConnected && rcRequestInFlight.compareAndSet(false, true)) {
+                KeyManager.get(RemoteControllerKey.KeyChannels, object : CompletionCallbackWith<IntArray> {
+                    override fun onSuccess(value: IntArray?) {
+                        rcRequestInFlight.set(false)
+                        if (value != null) updateRcChannels(value)
+                    }
+                    override fun onFailure(e: SkyException) { rcRequestInFlight.set(false) }
+                })
+            }
+            ui.postDelayed(this, 100L)
+        }
+    }
+
+    private fun updateRcChannels(values: IntArray) {
+        if (!activityResumed) return
+        lastRcUpdateMs = SystemClock.elapsedRealtime()
+        rcChannels = values.copyOf()
+        lastJoyDevice = "Skydroid ${RCSDKManager.getDeviceType()}"
+        axisLearner?.let { learner ->
+            learner.feedChannels(values, rcMins, rcMiddles, rcMaxes)?.let { binding -> assignAxis(learner.role, binding) }
+            updateRcMonitor(values)
+            return
+        }
+        fun direction(role: AxisRole) = shapeAxis(
+            AxisMapping.value(values, axisMap[role] ?: AxisBinding(-1, false), rcMins, rcMiddles, rcMaxes), axisDead
+        )
+        ptz.padPan = direction(AxisRole.RIGHT) - direction(AxisRole.LEFT)
+        ptz.padTilt = direction(AxisRole.UP) - direction(AxisRole.DOWN)
+        ptz.padZoom = 0f
+        updateRcMonitor(values)
+    }
+
+    private fun clearRcControl() {
+        ptz.padPan = 0f
+        ptz.padTilt = 0f
+        ptz.padZoom = 0f
+    }
+
+    private fun updateRcMonitor(values: IntArray) {
+        val tv = axisMonitor ?: return
+        if (settingsOverlay.visibility != View.VISIBLE) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - monitorUpdatedMs < 80) return
+        monitorUpdatedMs = now
+        val used = axisMap.entries.filter { it.value.used && it.value.skydroid }
+            .groupBy({ it.value.axis }, { it.key })
+        val sb = StringBuilder(lastJoyDevice).append("  •  RCSDK\n")
+        values.forEachIndexed { i, value ->
+            val role = used[i]?.joinToString(prefix = "  ← ") { it.name } ?: ""
+            sb.append(String.format(Locale.US, "CH%-2d %5d%s\n", i + 1, value, role))
+        }
+        tv.text = sb.toString().trimEnd()
+    }
+
     // ---------------- Settings → four joystick movement directions
 
     private fun buildAxisSection() {
         section("JOYSTICK MOVEMENT")
-        label("Map the four movement directions. Tap LEARN, then push the stick in the indicated " +
-            "direction. The controller must expose its stick axes to Android. Mappings save instantly.")
+        label("Map the four movement directions. Tap LEARN, then push the G20 stick in the indicated " +
+            "direction. Mappings save instantly.")
         axisLabels.clear()
         for (role in AxisRole.values()) {
             val row = LinearLayout(this).apply {
@@ -2533,7 +2652,7 @@ class MainActivity : AppCompatActivity() {
                 tv.text = "—"
                 tv.setTextColor(dim)
             } else {
-                tv.text = AxisMapping.axisName(b.axis) + if (b.invert) " ⇅" else ""
+                tv.text = (if (b.skydroid) "RC CH ${b.axis + 1}" else AxisMapping.axisName(b.axis)) + if (b.invert) " ⇅" else ""
                 tv.setTextColor(accent)
             }
         }
@@ -2545,7 +2664,7 @@ class MainActivity : AppCompatActivity() {
         ptz.padPan = 0f; ptz.padTilt = 0f; ptz.padZoom = 0f
         axisLearner = AxisLearner(role).apply { seed(lastAxisValues) }
         refreshAxisLabels()
-        hudMessage("${role.label}: release all sticks, then ${role.learnHint}")
+        hudMessage("${role.label}: release the stick, then ${role.learnHint}")
         ui.removeCallbacks(axisLearnTimeout)
         ui.postDelayed(axisLearnTimeout, 10_000)
     }
@@ -2553,7 +2672,7 @@ class MainActivity : AppCompatActivity() {
     private val axisLearnTimeout = Runnable {
         if (axisLearner != null) {
             endAxisLearn()
-            hudMessage("No stick movement detected – is the joystick listed under Live channels?", error = true)
+        hudMessage("No stick movement detected – check the live channel monitor and G20 connection.", error = true)
         }
     }
 
@@ -2568,7 +2687,7 @@ class MainActivity : AppCompatActivity() {
         axisMap[role] = b
         endAxisLearn()
         saveAxisMap()
-        hudMessage("${AxisMapping.axisName(b.axis)} → ${role.label}")
+        hudMessage("${if (b.skydroid) "RC CH ${b.axis + 1}" else AxisMapping.axisName(b.axis)} → ${role.label}")
     }
 
     private fun saveAxisMap() {
@@ -2580,23 +2699,6 @@ class MainActivity : AppCompatActivity() {
         axisDead = (axisDead + d).coerceIn(0f, 0.5f)
         AxisMapping.setDeadzone(prefs, axisDead)
         refreshAxisLabels()
-    }
-
-    private fun smallButton(text: String, onClick: () -> Unit) = Button(this).apply {
-        this.text = text
-        typeface = fontBold
-        textSize = 12f
-        letterSpacing = 0.06f
-        minWidth = 0
-        minHeight = 0
-        minimumWidth = 0
-        minimumHeight = 0
-        setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), 0)
-        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
-        setBackgroundResource(R.drawable.btn_secondary)
-        stateListAnimator = null
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (34 * dp).toInt())
-        setOnClickListener { it.tick(); onClick() }
     }
 
     // ------------------------------------------------------------------ misc

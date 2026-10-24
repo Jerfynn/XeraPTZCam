@@ -18,7 +18,12 @@ enum class AxisRole(val label: String, val learnHint: String) {
  * [axis] is an Android MotionEvent axis (AXIS_X, AXIS_RZ, AXIS_GENERIC_1 …), -1 = not used.
  * [center] is the value the channel reports at rest (NaN = middle of the channel's range).
  */
-data class AxisBinding(val axis: Int, val invert: Boolean, val center: Float = Float.NaN) {
+data class AxisBinding(
+    val axis: Int,
+    val invert: Boolean,
+    val center: Float = Float.NaN,
+    val skydroid: Boolean = false,
+) {
     val used get() = axis >= 0
 }
 
@@ -49,14 +54,14 @@ object AxisMapping {
             val axis = f[1].toIntOrNull() ?: continue
             val inv = f[2] == "1"
             val center = f.getOrNull(3)?.toFloatOrNull() ?: Float.NaN
-            out[role] = AxisBinding(axis, inv, center)
+            out[role] = AxisBinding(axis, inv, center, f.getOrNull(4) == "S")
         }
         return out
     }
 
     fun save(p: SharedPreferences, map: Map<AxisRole, AxisBinding>) {
         val raw = map.entries.joinToString(";") { (r, b) ->
-            "${r.name}:${b.axis}:${if (b.invert) 1 else 0}:${if (b.center.isNaN()) "" else b.center}"
+            "${r.name}:${b.axis}:${if (b.invert) 1 else 0}:${if (b.center.isNaN()) "" else b.center}:${if (b.skydroid) "S" else "A"}"
         }
         p.edit().putString(PREF, raw).apply()
     }
@@ -83,7 +88,7 @@ object AxisMapping {
      * Returns 0 if the axis is not present on this device.
      */
     fun value(e: MotionEvent, b: AxisBinding): Float {
-        if (!b.used) return 0f
+        if (!b.used || b.skydroid) return 0f
         val range = e.device?.getMotionRange(b.axis, e.source) ?: return 0f
         val v = e.getAxisValue(b.axis)
         val min = range.min
@@ -98,6 +103,22 @@ object AxisMapping {
         n = n.coerceIn(-1f, 1f)
         return if (b.invert) -n else n
     }
+
+    /** Skydroid RCSDK channels are integer values; use the controller's configured limits when known. */
+    fun value(channels: IntArray, b: AxisBinding, mins: IntArray, middles: IntArray, maxes: IntArray): Float {
+        if (!b.used || !b.skydroid || b.axis !in channels.indices) return 0f
+        val i = b.axis
+        val lo = mins.getOrElse(i) { 0 }.toFloat()
+        val hi = maxes.getOrElse(i) { 1000 }.toFloat()
+        val c = if (b.center.isNaN()) middles.getOrElse(i) { ((lo + hi) / 2f).toInt() }.toFloat() else b.center
+        val v = channels[i].toFloat()
+        val n = when {
+            v >= c && hi - c > 1e-4f -> (v - c) / (hi - c)
+            v < c && c - lo > 1e-4f -> (v - c) / (c - lo)
+            else -> 0f
+        }.coerceIn(-1f, 1f)
+        return if (b.invert) -n else n
+    }
 }
 
 /**
@@ -107,6 +128,7 @@ object AxisMapping {
 class AxisLearner(val role: AxisRole) {
     private val rest = HashMap<Int, Float>()
     private val ranges = HashMap<Int, Float>()
+    private val channelRest = HashMap<Int, Float>()
 
     /** Seeds rest values from the last known state of every axis (stick released). */
     fun seed(lastValues: Map<Int, Float>) {
@@ -132,5 +154,23 @@ class AxisLearner(val role: AxisRole) {
         if (best == MotionEvent.AXIS_HAT_X || best == MotionEvent.AXIS_HAT_Y) return null
         val center = rest[best] ?: 0f
         return AxisBinding(best, invert = bestDelta < 0, center = center)
+    }
+
+    /** Learn a Skydroid RCSDK channel while the user pushes one physical stick direction. */
+    fun feedChannels(values: IntArray, mins: IntArray, middles: IntArray, maxes: IntArray): AxisBinding? {
+        var best = -1
+        var bestFrac = 0f
+        var bestDelta = 0f
+        for (i in values.indices) {
+            val center = middles.getOrElse(i) { 500 }.toFloat()
+            val base = channelRest.getOrPut(i) { center }
+            val low = mins.getOrElse(i) { 0 }.toFloat()
+            val high = maxes.getOrElse(i) { 1000 }.toFloat()
+            val half = maxOf(center - low, high - center).coerceAtLeast(1f)
+            val frac = abs(values[i] - base) / half
+            if (frac > bestFrac) { bestFrac = frac; best = i; bestDelta = values[i] - base }
+        }
+        if (best < 0 || bestFrac < 0.35f) return null
+        return AxisBinding(best, invert = bestDelta < 0, center = channelRest[best] ?: values[best].toFloat(), skydroid = true)
     }
 }
