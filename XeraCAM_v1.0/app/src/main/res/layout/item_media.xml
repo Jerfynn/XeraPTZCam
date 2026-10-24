@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.xera.ptzcam.SquareFrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_margin="4dp"
+    android:background="@drawable/thumb_bg"
+    android:foreground="?android:attr/selectableItemBackground">
+
+    <ImageView
+        android:id="@+id/thumb"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="Thumbnail"
+        android:scaleType="centerCrop" />
+
+    <ImageView
+        android:id="@+id/playIcon"
+        android:layout_width="34dp"
+        android:layout_height="34dp"
+        android:layout_gravity="center"
+        android:background="@drawable/circle_dark"
+        android:contentDescription="Video"
+        android:padding="7dp"
+        android:src="@drawable/ic_play" />
+
+    <TextView
+        android:id="@+id/name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:background="#99000000"
+        android:ellipsize="middle"
+        android:fontFamily="@font/rajdhani_semibold"
+        android:maxLines="1"
+        android:paddingStart="6dp"
+        android:paddingTop="2dp"
+        android:paddingEnd="6dp"
+        android:paddingBottom="2dp"
+        android:textColor="#FFFFFF"
+        android:textSize="10sp" />
+
+    <TextView
+        android:id="@+id/duration"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="5dp"
+        android:background="@drawable/glass_pill"
+        android:fontFamily="@font/jetbrains_mono"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:textColor="#FFFFFF"
+        android:textSize="10sp" />
+</com.xera.ptzcam.SquareFrameLayout>
