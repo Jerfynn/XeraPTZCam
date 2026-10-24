@@ -2219,7 +2219,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
             setBackgroundResource(R.drawable.field_bg)
             setPadding((10 * dp).toInt(), (9 * dp).toInt(), (10 * dp).toInt(), (9 * dp).toInt())
-            textIsSelectable = true
+            setTextIsSelectable(true)
         }
         settingsContent.addView(shareUrl, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
