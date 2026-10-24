@@ -2206,11 +2206,12 @@ class MainActivity : AppCompatActivity() {
 
         buildAxisSection()
 
-        section("LAPTOP VIDEO SHARING")
+        section("VIDEO SHARING")
         label(
-            "Turn on the G20 WLAN hotspot in system settings, connect your laptop to it, then open " +
-                "VLC → Media → Open Network Stream and use the camera RTSP address below. " +
-                "G20 image sharing requires system software 20241130 or newer."
+            "Connect the laptop to the G20 WLAN hotspot (the same external Wi-Fi alone will not share " +
+                "the camera stream), then open VLC → Media → Open Network Stream and use the camera " +
+                "RTSP address below. The camera must use a 192.168.144.x address with gateway " +
+                "192.168.144.10. G20 system software 20241130 or newer is required."
         )
         val shareUrl = TextView(this).apply {
             text = currentStreamUrl().ifBlank { "Connect to the camera to discover its RTSP address" }
@@ -2242,7 +2243,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         section("ABOUT")
-        label("XeraCAM ${versionName()} · SHJ-TW10-IR (ONVIF) · SIYI ZT6 (SIYI SDK) · LibVLC")
+        label("XeraCAM 1.0")
     }
 
     private fun openG20HotspotSettings() {

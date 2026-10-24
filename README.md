@@ -11,7 +11,7 @@ The Skydroid link bridges Ethernet on the 192.168.144.x subnet. The camera must 
    Configuration → Device → Network → TCP/IP and set:
    - IPv4 Address: 192.168.144.68
    - Subnet Mask: 255.255.255.0
-   - Gateway: 192.168.144.1
+   - Gateway: 192.168.144.10 (required for G20 video sharing)
    Save. (Avoid 192.168.144.10 / .11 / .12 – Skydroid uses those for the link units.)
 2. Connect the camera's Ethernet to the GR01 Ethernet port and power both.
 3. To reach the camera from the PC again, set the PC's Ethernet to 192.168.144.50 / 255.255.255.0.
@@ -97,9 +97,11 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - On other Android devices, standard Android joystick axes remain supported.
 
 ### View the camera stream on a laptop
-- Settings → LAPTOP VIDEO SHARING opens the G20 hotspot settings and shows the current camera RTSP URL.
-- Enable the G20 WLAN hotspot in Android settings, connect the laptop to it, then open the copied URL in VLC
-  (Media → Open Network Stream). G20 system software 20241130 or newer is required for image sharing.
+- Settings → VIDEO SHARING shows the current camera RTSP URL and opens the G20 hotspot settings.
+- Connect the laptop to the G20 WLAN hotspot (the same external Wi-Fi alone does not share the camera's
+  wired stream), then open the copied URL in VLC (Media → Open Network Stream).
+- The camera must use a 192.168.144.x address with gateway 192.168.144.10. G20 system software
+  20241130 or newer is required for image sharing.
 
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.
