@@ -115,6 +115,11 @@ class OnvifClient(
         }
     }
 
+    /** Reapplies the G20 date/time and timezone; call periodically while connected. */
+    fun synchronizeClockFromDevice() {
+        syncClock()
+    }
+
     // ------------------------------------------------------------------ PTZ
 
     /** Speeds in -1..1. Camera keeps moving until stop() is sent. */

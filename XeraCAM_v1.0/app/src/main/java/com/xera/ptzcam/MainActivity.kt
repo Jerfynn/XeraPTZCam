@@ -146,6 +146,7 @@ class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
     private var onvifJob: Job? = null
     private var statusJob: Job? = null
+    private var clockSyncJob: Job? = null
     private var onvifRtsp: String? = null
 
     private var playerStarted = false
@@ -347,6 +348,7 @@ class MainActivity : AppCompatActivity() {
         ui.removeCallbacks(hideControls)
         onvifJob?.cancel()
         statusJob?.cancel()
+        clockSyncJob?.cancel()
         siyiJob?.cancel()
         aimJob?.cancel()
         ptz.halt()
@@ -651,6 +653,7 @@ class MainActivity : AppCompatActivity() {
                     if (!playerStarted) playStream()
                     readNightState(ok.first)
                     startStatusPolling(ok.first)
+                    startClockSync(ok.first)
                     return@launch
                 }
                 setStep(Step.ONVIF, StepState.FAIL, result.exceptionOrNull()?.message ?: "Login failed")
@@ -1332,6 +1335,20 @@ class MainActivity : AppCompatActivity() {
                     fails++
                 }
                 delay(if (fails > 3) 5000L else 300L)
+            }
+        }
+    }
+
+    /** Re-syncs the camera OSD clock while connected, including after a camera time reset. */
+    private fun startClockSync(c: OnvifClient) {
+        clockSyncJob?.cancel()
+        clockSyncJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(60_000L)
+                withContext(Dispatchers.IO) { c.synchronizeClockFromDevice() }
+                if (onvif === c) {
+                    setStep(Step.ONVIF, StepState.OK, "PTZ ready · ${c.cameraClockStatus}")
+                }
             }
         }
     }
