@@ -25,6 +25,7 @@ import android.provider.MediaStore
 import android.text.InputType
 import android.view.HapticFeedbackConstants
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PixelCopy
 import android.view.SurfaceView
@@ -172,6 +173,11 @@ class MainActivity : AppCompatActivity() {
     private var axisMonitor: TextView? = null
     private val axisLabels = LinkedHashMap<AxisRole, TextView>()
     private var axisDeadLabel: TextView? = null
+    private var buttonMap: MutableMap<RemoteButtonAction, RemoteButtonBinding> = mutableMapOf()
+    private var buttonLearner: RemoteButtonAction? = null
+    private var buttonLearnBaseline = IntArray(0)
+    private val buttonChannelStates = HashMap<RemoteButtonAction, Boolean>()
+    private val buttonLabels = LinkedHashMap<RemoteButtonAction, TextView>()
     private var monitorUpdatedMs = 0L
     // G20 sticks are read through Skydroid RCSDK (they are not Android joystick MotionEvents).
     private var rcSdkInitialized = false
@@ -239,6 +245,7 @@ class MainActivity : AppCompatActivity() {
         settings = CamSettings.load(prefs)
         axisMap = AxisMapping.load(prefs)
         axisDead = AxisMapping.deadzone(prefs)
+        buttonMap = RemoteButtonMapping.load(prefs)
         bindViews()
 
         libVlc = LibVLC(
@@ -2701,10 +2708,29 @@ class MainActivity : AppCompatActivity() {
             if (hx != 0f || hy != 0f) { x = shapeAxis(hx * 0.6f); y = -shapeAxis(hy * 0.6f) }
             ptz.padPan = x
             ptz.padTilt = y
-            ptz.padZoom = 0f
+            ptz.padZoom = shapeAxis(
+                AxisMapping.value(event, axisMap[AxisRole.ZOOM] ?: AxisBinding(-1, false)), axisDead
+            )
             return true
         }
         return super.onGenericMotionEvent(event)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val mappedAction = buttonMap.entries.firstOrNull { it.value.keyCode == event.keyCode }?.key
+        if (event.action == KeyEvent.ACTION_DOWN && event.keyCode != KeyEvent.KEYCODE_BACK) {
+            if (event.repeatCount == 0) {
+                val learning = buttonLearner
+                if (learning != null) {
+                    assignRemoteButton(learning, event.keyCode)
+                    return true
+                }
+                if (mappedAction != null) performRemoteButtonAction(mappedAction)
+            }
+            if (mappedAction != null) return true
+        }
+        if (event.action == KeyEvent.ACTION_UP && mappedAction != null) return true
+        return super.dispatchKeyEvent(event)
     }
 
     private fun initSkydroidRcSdk() {
@@ -2769,6 +2795,8 @@ class MainActivity : AppCompatActivity() {
         lastRcUpdateMs = SystemClock.elapsedRealtime()
         rcChannels = values.copyOf()
         lastJoyDevice = "Skydroid ${RCSDKManager.getDeviceType()}"
+        learnRemoteChannelButton(values)
+        processRemoteChannelButtons(values)
         axisLearner?.let { learner ->
             learner.feedChannels(values, rcMins, rcMiddles, rcMaxes)?.let { binding -> assignAxis(learner.role, binding) }
             updateRcMonitor(values)
@@ -2779,7 +2807,7 @@ class MainActivity : AppCompatActivity() {
         )
         ptz.padPan = direction(AxisRole.RIGHT) - direction(AxisRole.LEFT)
         ptz.padTilt = direction(AxisRole.UP) - direction(AxisRole.DOWN)
-        ptz.padZoom = 0f
+        ptz.padZoom = direction(AxisRole.ZOOM)
         updateRcMonitor(values)
     }
 
@@ -2900,6 +2928,41 @@ class MainActivity : AppCompatActivity() {
         formTarget.addView(reset, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()
         ).apply { topMargin = (8 * dp).toInt() })
+
+        section("REMOTE BUTTONS")
+        hint("Tap LEARN, then press a G20 button or switch. RC channel switches and Android key buttons are supported.")
+        buttonLabels.clear()
+        for (action in RemoteButtonAction.values()) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
+            }
+            row.addView(TextView(this).apply {
+                text = action.label
+                typeface = fontSemi
+                textSize = 14f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            val keyLabel = TextView(this).apply {
+                typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
+                textSize = 10f
+                gravity = android.view.Gravity.CENTER
+                setPadding((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
+                setBackgroundResource(R.drawable.glass_pill)
+            }
+            row.addView(keyLabel, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = (4 * dp).toInt() })
+            row.addView(smallButton("LEARN") { beginButtonLearn(action) })
+            row.addView(smallButton("×") { clearRemoteButton(action) },
+                LinearLayout.LayoutParams((40 * dp).toInt(), (34 * dp).toInt()).apply {
+                    marginStart = (4 * dp).toInt()
+                })
+            buttonLabels[action] = keyLabel
+            formTarget.addView(row)
+        }
+        refreshRemoteButtonLabels()
         refreshAxisLabels()
     }
 
@@ -2937,7 +3000,7 @@ class MainActivity : AppCompatActivity() {
         val dim = ContextCompat.getColor(this, R.color.text_dim)
         for ((role, tv) in axisLabels) {
             if (axisLearner?.role == role) {
-                tv.text = "MOVE STICK…"
+                tv.text = if (role == AxisRole.ZOOM) "MOVE SLIDER…" else "MOVE STICK…"
                 tv.setTextColor(accent)
                 continue
             }
@@ -2955,8 +3018,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun beginAxisLearn(role: AxisRole) {
         currentFocus?.clearFocus()
+        buttonLearner = null
+        ui.removeCallbacks(buttonLearnTimeout)
+        refreshRemoteButtonLabels()
         ptz.padPan = 0f; ptz.padTilt = 0f; ptz.padZoom = 0f
-        axisLearner = AxisLearner(role).apply { seed(lastAxisValues) }
+        axisLearner = AxisLearner(role).apply {
+            seed(lastAxisValues)
+            seedChannels(rcChannels)
+        }
         refreshAxisLabels()
         hudMessage("${role.label}: release the stick, then ${role.learnHint}")
         ui.removeCallbacks(axisLearnTimeout)
@@ -2993,6 +3062,130 @@ class MainActivity : AppCompatActivity() {
         axisDead = (axisDead + d).coerceIn(0f, 0.5f)
         AxisMapping.setDeadzone(prefs, axisDead)
         refreshAxisLabels()
+    }
+
+    private fun beginButtonLearn(action: RemoteButtonAction) {
+        currentFocus?.clearFocus()
+        axisLearner = null
+        ui.removeCallbacks(axisLearnTimeout)
+        refreshAxisLabels()
+        buttonLearner = action
+        buttonLearnBaseline = rcChannels.copyOf()
+        refreshRemoteButtonLabels()
+        hudMessage("${action.label}: press the G20 button or switch to assign")
+        ui.removeCallbacks(buttonLearnTimeout)
+        ui.postDelayed(buttonLearnTimeout, 10_000)
+    }
+
+    private val buttonLearnTimeout = Runnable {
+        if (buttonLearner != null) {
+            buttonLearner = null
+            refreshRemoteButtonLabels()
+            hudMessage("No button or RC channel change detected. Check the live channel monitor.", error = true)
+        }
+    }
+
+    private fun assignRemoteButton(action: RemoteButtonAction, keyCode: Int) {
+        buttonMap.entries.removeAll { it.key != action && it.value.keyCode == keyCode }
+        buttonMap[action] = RemoteButtonBinding(keyCode = keyCode)
+        buttonLearner = null
+        ui.removeCallbacks(buttonLearnTimeout)
+        RemoteButtonMapping.save(prefs, buttonMap)
+        refreshRemoteButtonLabels()
+        hudMessage("${KeyEvent.keyCodeToString(keyCode).removePrefix("KEYCODE_")} → ${action.label}")
+    }
+
+    private fun learnRemoteChannelButton(values: IntArray) {
+        val action = buttonLearner ?: return
+        if (buttonLearnBaseline.size != values.size) {
+            buttonLearnBaseline = values.copyOf()
+            return
+        }
+        val usedChannels = axisMap.values.filter { it.used && it.skydroid }.map { it.axis }.toSet()
+        var best = -1
+        var bestFraction = 0f
+        var bestDirection = 0
+        for (i in values.indices) {
+            if (i in usedChannels) continue
+            val baseline = buttonLearnBaseline[i].toFloat()
+            val low = rcMins.getOrElse(i) { 0 }.toFloat()
+            val high = rcMaxes.getOrElse(i) { 1000 }.toFloat()
+            val half = ((high - low) / 2f).coerceAtLeast(1f)
+            val delta = values[i] - baseline
+            val fraction = abs(delta) / half
+            if (fraction > bestFraction) {
+                best = i
+                bestFraction = fraction
+                bestDirection = if (delta >= 0) 1 else -1
+            }
+        }
+        if (best >= 0 && bestFraction >= 0.35f) {
+            assignRemoteChannelButton(action, best, bestDirection, values)
+        }
+    }
+
+    private fun assignRemoteChannelButton(
+        action: RemoteButtonAction,
+        channel: Int,
+        direction: Int,
+        currentValues: IntArray,
+    ) {
+        buttonMap.entries.removeAll { it.key != action && it.value.rcChannel == channel }
+        buttonMap[action] = RemoteButtonBinding(rcChannel = channel, direction = direction)
+        buttonChannelStates[action] = isRemoteChannelActive(buttonMap.getValue(action), currentValues)
+        buttonLearner = null
+        ui.removeCallbacks(buttonLearnTimeout)
+        RemoteButtonMapping.save(prefs, buttonMap)
+        refreshRemoteButtonLabels()
+        hudMessage("RC CH ${channel + 1} → ${action.label}")
+    }
+
+    private fun processRemoteChannelButtons(values: IntArray) {
+        for ((action, binding) in buttonMap) {
+            if (binding.rcChannel == null) continue
+            val active = isRemoteChannelActive(binding, values)
+            val previous = buttonChannelStates.put(action, active)
+            if (previous == false && active) performRemoteButtonAction(action)
+        }
+    }
+
+    private fun isRemoteChannelActive(binding: RemoteButtonBinding, values: IntArray): Boolean {
+        val i = binding.rcChannel ?: return false
+        if (i !in values.indices) return false
+        val middle = rcMiddles.getOrElse(i) { 500 }.toFloat()
+        val threshold = if (binding.direction >= 0) {
+            (middle + rcMaxes.getOrElse(i) { 1000 }.toFloat()) / 2f
+        } else {
+            (middle + rcMins.getOrElse(i) { 0 }.toFloat()) / 2f
+        }
+        return if (binding.direction >= 0) values[i] >= threshold else values[i] <= threshold
+    }
+
+    private fun clearRemoteButton(action: RemoteButtonAction) {
+        buttonMap.remove(action)
+        buttonChannelStates.remove(action)
+        RemoteButtonMapping.save(prefs, buttonMap)
+        refreshRemoteButtonLabels()
+    }
+
+    private fun refreshRemoteButtonLabels() {
+        for ((action, label) in buttonLabels) {
+            label.text = if (buttonLearner == action) "PRESS BUTTON" else
+                buttonMap[action]?.let { binding ->
+                    binding.keyCode?.let { "KEY ${KeyEvent.keyCodeToString(it).removePrefix("KEYCODE_")}" }
+                        ?: binding.rcChannel?.let { "RC CH ${it + 1}" }
+                } ?: "—"
+        }
+    }
+
+    private fun performRemoteButtonAction(action: RemoteButtonAction) {
+        when (action) {
+            RemoteButtonAction.RECORD -> toggleRecord()
+            RemoteButtonAction.CAPTURE -> takePhoto()
+            RemoteButtonAction.WIPE -> setWiper(!wiperOn)
+            RemoteButtonAction.AUTO -> setNight(null)
+            RemoteButtonAction.HOME -> goHome()
+        }
     }
 
     private fun smallButton(text: String, onClick: () -> Unit) = Button(this).apply {

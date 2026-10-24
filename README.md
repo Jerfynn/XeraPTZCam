@@ -103,6 +103,13 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - The camera must use a 192.168.144.x address with gateway 192.168.144.10. G20 system software
   20241130 or newer is required for image sharing.
 
+### Skydroid controls
+- Settings → CONTROL → Joystick: learn left/right/up/down from the four gimbal movement channels.
+- Learn the Zoom slider by tapping LEARN on Zoom, then move the G20 slider toward zoom in. Use REV if
+  the direction is backwards.
+- Under REMOTE BUTTONS, learn Recording, Capture photo, Wipe, IR Auto, and Home by pressing each G20
+  button or switch. The app learns either RC channel switches or Android key buttons.
+
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.
 - Requires Android 10 or newer.

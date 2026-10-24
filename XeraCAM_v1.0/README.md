@@ -132,5 +132,8 @@ SHJ-TW10: VLC asks for the camera username / password.
 
 - The G20 built-in sticks are read using Skydroid RCSDK 1.9.2. Close other Skydroid apps that use
   the controller connection if the live RCSDK channel monitor stays empty.
+- In Settings → CONTROL, learn the four movement directions and the zoom slider from the live RC
+  channels. Use REMOTE BUTTONS to assign recording, capture, wipe, IR Auto, and home to channel
+  switches or Android key buttons.
 - If recording reports "not available", change libvlc-all in app/build.gradle.kts to 3.6.0 and rebuild,
   or record on the camera's SD card (Storage menu).

@@ -11,6 +11,7 @@ enum class AxisRole(val label: String, val learnHint: String) {
     RIGHT("Move right", "push the stick fully RIGHT"),
     UP("Move up", "push the stick fully UP"),
     DOWN("Move down", "push the stick fully DOWN"),
+    ZOOM("Zoom", "move the zoom slider toward zoom in"),
 }
 
 /**
@@ -42,6 +43,7 @@ object AxisMapping {
         AxisRole.RIGHT to AxisBinding(MotionEvent.AXIS_X, invert = false),
         AxisRole.UP to AxisBinding(MotionEvent.AXIS_Y, invert = true),
         AxisRole.DOWN to AxisBinding(MotionEvent.AXIS_Y, invert = false),
+        AxisRole.ZOOM to AxisBinding(-1, invert = false),
     )
 
     fun load(p: SharedPreferences): MutableMap<AxisRole, AxisBinding> {
@@ -171,6 +173,13 @@ class AxisLearner(val role: AxisRole) {
             if (frac > bestFrac) { bestFrac = frac; best = i; bestDelta = values[i] - base }
         }
         if (best < 0 || bestFrac < 0.35f) return null
-        return AxisBinding(best, invert = bestDelta < 0, center = channelRest[best] ?: values[best].toFloat(), skydroid = true)
+        // Use the configured channel midpoint so a learned analog slider can zoom both in and out.
+        val mid = middles.getOrElse(best) { 500 }.toFloat()
+        return AxisBinding(best, invert = bestDelta < 0, center = mid, skydroid = true)
+    }
+
+    /** Seed learning at the live RC values, especially important when a slider rests off-center. */
+    fun seedChannels(values: IntArray) {
+        values.forEachIndexed { i, value -> channelRest[i] = value.toFloat() }
     }
 }
