@@ -96,6 +96,11 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
   LEARN once for each direction; the live channel monitor shows the RCSDK channel values.
 - On other Android devices, standard Android joystick axes remain supported.
 
+### View the camera stream on a laptop
+- Settings → LAPTOP VIDEO SHARING opens the G20 hotspot settings and shows the current camera RTSP URL.
+- Enable the G20 WLAN hotspot in Android settings, connect the laptop to it, then open the copied URL in VLC
+  (Media → Open Network Stream). G20 system software 20241130 or newer is required for image sharing.
+
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.
 - Requires Android 10 or newer.

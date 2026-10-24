@@ -3,6 +3,8 @@ package com.xera.ptzcam
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Intent
 import android.content.IntentFilter
@@ -2204,8 +2206,60 @@ class MainActivity : AppCompatActivity() {
 
         buildAxisSection()
 
+        section("LAPTOP VIDEO SHARING")
+        label(
+            "Turn on the G20 WLAN hotspot in system settings, connect your laptop to it, then open " +
+                "VLC → Media → Open Network Stream and use the camera RTSP address below. " +
+                "G20 image sharing requires system software 20241130 or newer."
+        )
+        val shareUrl = TextView(this).apply {
+            text = currentStreamUrl().ifBlank { "Connect to the camera to discover its RTSP address" }
+            typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
+            textSize = 11f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
+            setBackgroundResource(R.drawable.field_bg)
+            setPadding((10 * dp).toInt(), (9 * dp).toInt(), (10 * dp).toInt(), (9 * dp).toInt())
+            textIsSelectable = true
+        }
+        settingsContent.addView(shareUrl, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = (6 * dp).toInt() })
+        settingsContent.addView(smallButton("OPEN G20 HOTSPOT SETTINGS") { openG20HotspotSettings() },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()).apply {
+                topMargin = (8 * dp).toInt()
+            })
+        settingsContent.addView(smallButton("COPY CAMERA RTSP ADDRESS") {
+            val url = currentStreamUrl()
+            if (url.isBlank()) {
+                hudMessage("Connect to the camera first to get its RTSP address", error = true)
+            } else {
+                (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(ClipData.newPlainText("Camera RTSP address", url))
+                hudMessage("Camera RTSP address copied")
+            }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()).apply {
+            topMargin = (6 * dp).toInt()
+        })
+
         section("ABOUT")
         label("XeraCAM ${versionName()} · SHJ-TW10-IR (ONVIF) · SIYI ZT6 (SIYI SDK) · LibVLC")
+    }
+
+    private fun openG20HotspotSettings() {
+        val actions = listOf(
+            "android.settings.TETHER_SETTINGS",
+            "com.android.settings.WIFI_TETHER_SETTINGS",
+            android.provider.Settings.ACTION_SETTINGS,
+        )
+        for (action in actions) {
+            try {
+                startActivity(Intent(action))
+                return
+            } catch (_: Exception) {
+                // Try the next system settings entry point supported by this G20 firmware.
+            }
+        }
+        hudMessage("Open Android Settings → Network & Internet → Hotspot & Network Sharing", error = true)
     }
 
     /** White-on-dark dropdown rows for the camera-model spinner. */
