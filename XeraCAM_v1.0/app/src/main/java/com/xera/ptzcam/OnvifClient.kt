@@ -248,13 +248,18 @@ class OnvifClient(
     /** WS-Security timestamps must match the camera clock, so measure the offset first. */
     private fun syncClock() {
         try {
-            readCameraUtcMillis()?.let { clockOffsetMs = it - System.currentTimeMillis() }
+            readCameraTimes()?.first?.let { clockOffsetMs = it - System.currentTimeMillis() }
             setSystemDateAndTimeFromDevice()
-            val readBack = readCameraUtcMillis()
+            val readBack = readCameraTimes()
                 ?: throw OnvifException("camera returned no time after setting it")
-            val differenceMs = readBack - System.currentTimeMillis()
-            if (kotlin.math.abs(differenceMs) > CLOCK_SYNC_TOLERANCE_MS) {
-                throw OnvifException("camera clock still differs by ${kotlin.math.abs(differenceMs) / 1000}s")
+            val now = System.currentTimeMillis()
+            val utcDifference = readBack.first?.minus(now)
+            if (utcDifference == null || kotlin.math.abs(utcDifference) > CLOCK_SYNC_TOLERANCE_MS) {
+                throw OnvifException("camera UTC clock differs by ${formatClockDifference(utcDifference)}")
+            }
+            val localDifference = readBack.second?.minus(deviceLocalWallMillis(now))
+            if (localDifference != null && kotlin.math.abs(localDifference) > CLOCK_SYNC_TOLERANCE_MS) {
+                throw OnvifException("camera local time differs by ${formatClockDifference(localDifference)}")
             }
             clockOffsetMs = 0L
             cameraClockSynced = true
@@ -268,23 +273,47 @@ class OnvifClient(
     }
 
     /** Reads the UTC clock fields from ONVIF and converts them into epoch milliseconds. */
-    private fun readCameraUtcMillis(): Long? {
+    private fun readCameraTimes(): Pair<Long?, Long?>? {
         val r = String(
             request(deviceUrl, { envelope("<tds:GetSystemDateAndTime xmlns:tds=\"$NS_DEVICE\"/>", secure = false) }),
             Charsets.UTF_8
         )
-        val utc = r.substringAfter("UTCDateTime", "")
-        fun v(tag: String): Int? = Regex("<(?:\\w+:)?$tag>(\\d+)<").find(utc)?.groupValues?.get(1)?.toIntOrNull()
-        val year = v("Year") ?: return null
-        val month = v("Month") ?: return null
-        val day = v("Day") ?: return null
-        val hour = v("Hour") ?: return null
-        val minute = v("Minute") ?: return null
-        val second = v("Second") ?: return null
+        fun parseDateTime(element: String): Long? {
+            val block = Regex(
+                "<(?:\\w+:)?$element\\b[^>]*>(.*?)</(?:\\w+:)?$element\\s*>",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            ).find(r)?.groupValues?.get(1) ?: return null
+            fun v(tag: String): Int? = Regex("<(?:\\w+:)?$tag>(\\d+)<").find(block)?.groupValues?.get(1)?.toIntOrNull()
+            val year = v("Year") ?: return null
+            val month = v("Month") ?: return null
+            val day = v("Day") ?: return null
+            val hour = v("Hour") ?: return null
+            val minute = v("Minute") ?: return null
+            val second = v("Second") ?: return null
+            return Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                clear()
+                set(year, month - 1, day, hour, minute, second)
+            }.timeInMillis
+        }
+        return parseDateTime("UTCDateTime") to parseDateTime("LocalDateTime")
+    }
+
+    /** Represents G20 local wall-clock fields on a UTC timeline for comparison with ONVIF fields. */
+    private fun deviceLocalWallMillis(now: Long): Long {
+        val local = Calendar.getInstance().apply { timeInMillis = now }
         return Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
             clear()
-            set(year, month - 1, day, hour, minute, second)
+            set(local.get(Calendar.YEAR), local.get(Calendar.MONTH), local.get(Calendar.DAY_OF_MONTH),
+                local.get(Calendar.HOUR_OF_DAY), local.get(Calendar.MINUTE), local.get(Calendar.SECOND))
         }.timeInMillis
+    }
+
+    private fun formatClockDifference(differenceMs: Long?): String {
+        if (differenceMs == null) return "unknown"
+        val totalMinutes = kotlin.math.abs(differenceMs) / 60_000
+        val hours = totalMinutes / 60
+        val minutes = totalMinutes % 60
+        return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
     }
 
     /** Set the camera's embedded OSD clock to the G20's clock and current local timezone. */
