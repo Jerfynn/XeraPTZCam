@@ -1542,6 +1542,9 @@ class MainActivity : AppCompatActivity() {
             setHWDecoderEnabled(true, false)
             addOption(":network-caching=${settings.cachingMs}")
             addOption(":live-caching=${settings.cachingMs}")
+            // RTSP has its own cache in VLC. Keep it aligned with the network/live cache;
+            // otherwise RTSP can retain its much larger default even when these are low.
+            addOption(":rtsp-caching=${settings.cachingMs}")
             addOption(":clock-jitter=0")
             addOption(":clock-synchro=0")
             addOption(":no-audio")
@@ -1707,7 +1710,7 @@ class MainActivity : AppCompatActivity() {
         if (offset < minClockOffset) minClockOffset = offset
         val lag = offset - minClockOffset
         lagTicks = if (lag > CATCHUP_LAG_MS) lagTicks + 1 else 0
-        if (lagTicks >= 3) {
+        if (lagTicks >= 2) {
             lagTicks = 0
             hudMessage(String.format(Locale.US, "Video delay built up (%.1f s) – resyncing", lag / 1000.0))
             ui.removeCallbacks(retry)
@@ -2085,7 +2088,7 @@ class MainActivity : AppCompatActivity() {
             "Second RTSP stream (hold VIEW to switch)", s.rtsp2,
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         ) else null
-        formCache = field("Video buffer, ms (lower = less delay)", s.cachingMs.toString(), InputType.TYPE_CLASS_NUMBER)
+        formCache = field("Video buffer, ms (50 recommended; lower delay can stutter on weak links)", s.cachingMs.toString(), InputType.TYPE_CLASS_NUMBER)
         formTcp = check("RTSP over TCP (recommended on radio links)", s.rtspTcp)
         formCatchUp = check("Auto resync when the video delay builds up", s.autoCatchUp)
 
@@ -2325,7 +2328,7 @@ class MainActivity : AppCompatActivity() {
             rtspTcp = formTcp?.isChecked ?: true,
             autoCatchUp = formCatchUp?.isChecked ?: base.autoCatchUp,
             maxSpeed = (formSpeed?.progress ?: 100).coerceAtLeast(10) / 100f,
-            cachingMs = (formCache?.text?.toString()?.toIntOrNull() ?: CamSettings.DEFAULT_CACHE_MS).coerceIn(30, 3000),
+            cachingMs = (formCache?.text?.toString()?.toIntOrNull() ?: CamSettings.DEFAULT_CACHE_MS).coerceIn(30, 500),
             swipeInvert = formInvert?.isChecked ?: false,
             wiperPreset = formWiper?.text?.toString()?.trim() ?: base.wiperPreset,
             maxZoom = (formZoom?.text?.toString()?.toIntOrNull() ?: base.maxZoom).coerceIn(1, 100),
@@ -2810,7 +2813,7 @@ class MainActivity : AppCompatActivity() {
         private const val AUTO_HIDE_MS = 4000L
         private const val WEAK_MS = 2_500L          // no new video for this long → WEAK badge
         private const val STALL_MS = 12_000L        // … and for this long → reconnect
-        private const val CATCHUP_LAG_MS = 1_200L   // video this far behind live → resync
+        private const val CATCHUP_LAG_MS = 600L    // sustained backlog beyond the small playback cache → resync
         private const val RTSP_FRAME_BUFFER = 2_000_000
         private const val UDP_DROP_LIMIT = 2
         private const val UDP_DROP_WINDOW_MS = 60_000L

@@ -87,14 +87,14 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - v3.1.4: the stall watchdog no longer relies on LibVLC's input byte counter (always 0 for RTSP, which
   caused "0 kbps" and a false "Video stalled – reconnecting…" every 6 s). It now watches playback time,
   demuxed bytes and decoded/displayed frames, and only reconnects after 12 s with no video at all.
-  Late frames are shown instead of dropped, so the picture keeps up while the gimbal is moving, and
-  recordings are no longer cut into pieces by false reconnects.
+  Late frames are dropped to keep the live picture from accumulating delay, and recordings are no
+  longer cut into pieces by false reconnects.
 
 ### Low latency (v3.1.5)
-- Video buffer default lowered to 100 ms (Settings → Video buffer; 50–80 ms on a clean link, 150+ if it stutters).
+- Video buffer default is 50 ms and applies to VLC's network, live, and RTSP caches (Settings → Video buffer; raise it if the link stutters).
 - Frames are shown the moment they are decoded; late frames are dropped so the delay cannot grow.
-- "Auto resync when the video delay builds up" (on by default): if the picture falls more than ~1.2 s
-  behind live (backlog on the radio link), the stream is re-opened to catch up. Skipped while recording
+- "Auto resync when the video delay builds up" (on by default): if the picture falls more than ~0.6 s
+  behind its recent baseline for two checks (backlog on the radio link), the stream is re-opened to catch up. Skipped while recording
   or tracking.
 - Biggest remaining factor is the camera bitrate vs. the radio link: use 1080p / the second stream,
   2–4 Mbps, and a short I-frame interval for the lowest delay.

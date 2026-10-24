@@ -56,7 +56,7 @@ data class CamSettings(
             .putBoolean("tcp", rtspTcp)
             .putFloat("speed", maxSpeed)
             .putInt("cache", cachingMs)
-            .putInt("cacheVer", 2)
+            .putInt("cacheVer", 3)
             .putBoolean("catchUp", autoCatchUp)
             .putBoolean("swipeInv", swipeInvert)
             .putBoolean("sdRecord", sdRecord)
@@ -76,7 +76,7 @@ data class CamSettings(
         const val MODEL_ZT6 = "SIYI ZT6"
         val MODELS = listOf(MODEL_SHJ, MODEL_ZT6)
         const val DEFAULT_PATROL = "FRONT,RIGHT,REAR,LEFT"
-        const val DEFAULT_CACHE_MS = 100
+        const val DEFAULT_CACHE_MS = 50
 
         private fun prefix(model: String) = if (model == MODEL_ZT6) "zt6_" else ""
 
@@ -97,9 +97,13 @@ data class CamSettings(
                 rtsp2 = p.getString(pre + "rtsp2", if (siyi) "rtsp://$defHost:8554/video2" else "") ?: "",
                 rtspTcp = p.getBoolean("tcp", true),
                 maxSpeed = p.getFloat("speed", 1f),
-                // v3.1.5: default buffer lowered 200 → 100 ms; an old saved default of 200 is migrated
+                // Migrate the previous app defaults so an upgrade actually gets the low-latency cache.
                 cachingMs = p.getInt("cache", DEFAULT_CACHE_MS).let {
-                    if (p.getInt("cacheVer", 1) < 2 && it == 200) DEFAULT_CACHE_MS else it
+                    when {
+                        p.getInt("cacheVer", 1) < 2 && it == 200 -> DEFAULT_CACHE_MS
+                        p.getInt("cacheVer", 1) < 3 && it == 100 -> DEFAULT_CACHE_MS
+                        else -> it
+                    }
                 },
                 autoCatchUp = p.getBoolean("catchUp", true),
                 swipeInvert = p.getBoolean("swipeInv", false),
