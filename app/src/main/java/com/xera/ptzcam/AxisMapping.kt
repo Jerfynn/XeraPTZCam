@@ -5,11 +5,12 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import kotlin.math.abs
 
-/** What a joystick channel (axis) can drive. */
+/** One of the four gimbal movement directions that can be learned from a joystick axis. */
 enum class AxisRole(val label: String, val learnHint: String) {
-    PAN("Pan (horizontal)", "push the stick fully RIGHT"),
-    TILT("Tilt (vertical)", "push the stick fully UP"),
-    ZOOM("Zoom", "push the stick/slider towards ZOOM IN"),
+    LEFT("Move left", "push the stick fully LEFT"),
+    RIGHT("Move right", "push the stick fully RIGHT"),
+    UP("Move up", "push the stick fully UP"),
+    DOWN("Move down", "push the stick fully DOWN"),
 }
 
 /**
@@ -22,7 +23,7 @@ data class AxisBinding(val axis: Int, val invert: Boolean, val center: Float = F
 }
 
 /**
- * Maps joystick channels to pan / tilt / zoom. Works with anything Android sees as a joystick:
+ * Maps joystick axes to the four movement directions. Works with anything Android sees as a joystick:
  * USB / Bluetooth gamepads, USB RC transmitters in joystick mode, and controller sticks the
  * ground station reports to Android. Stored globally (the same sticks drive every camera model).
  */
@@ -32,9 +33,10 @@ object AxisMapping {
     const val DEFAULT_DEADZONE = 0.08f
 
     fun defaults(): Map<AxisRole, AxisBinding> = linkedMapOf(
-        AxisRole.PAN to AxisBinding(MotionEvent.AXIS_X, invert = false),
-        AxisRole.TILT to AxisBinding(MotionEvent.AXIS_Y, invert = true),     // stick up = negative Y
-        AxisRole.ZOOM to AxisBinding(MotionEvent.AXIS_RZ, invert = true),
+        AxisRole.LEFT to AxisBinding(MotionEvent.AXIS_X, invert = true),
+        AxisRole.RIGHT to AxisBinding(MotionEvent.AXIS_X, invert = false),
+        AxisRole.UP to AxisBinding(MotionEvent.AXIS_Y, invert = true),
+        AxisRole.DOWN to AxisBinding(MotionEvent.AXIS_Y, invert = false),
     )
 
     fun load(p: SharedPreferences): MutableMap<AxisRole, AxisBinding> {

@@ -69,16 +69,6 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - Double-tap any point of the video: the gimbal turns so that point becomes the centre.
 - Uses the field of view (Settings → Tap-to-aim: visible 84.5°, thermal 32.8°) and the current zoom.
 
-### Button mapping (v3.1.7 – movement only)
-- Settings → BUTTON MAPPING has four actions: Move left, Move right, Move up, Move down.
-  Hold a button = gimbal moves, release = stops. One mapping for both cameras. Defaults: D-pad arrows.
-- Tap SET, press the G20 / gamepad button. ✕ clears, RESET restores the D-pad defaults.
-- Keys are now caught before Android's focus navigation (earlier versions lost D-pad/arrow keys to the
-  on-screen buttons, so nothing happened). Buttons that send only a hardware scan code ("SCAN 123") work too.
-- The box under the mapping shows the last button pressed (name, key code, scan code, device). If a G20
-  button shows nothing there, the controller does not send it to Android and no app can use it –
-  set that button's function in the G20's own Skydroid settings instead.
-
 ### Video transport
 - "RTSP over TCP" (default, recommended for Skydroid / any radio link): lost packets are re-sent and the
   RTSP session stays alive. UDP has slightly less delay but drops on lossy links.
@@ -99,14 +89,14 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
 - Biggest remaining factor is the camera bitrate vs. the radio link: use 1080p / the second stream,
   2–4 Mbps, and a short I-frame interval for the lowest delay.
 
-### Joystick channels (v3.1.5)
-- Settings → JOYSTICK CHANNELS: assign any joystick channel to Pan (horizontal), Tilt (vertical) and Zoom.
-- Tap LEARN, release the sticks, then push the stick the way the hint says (RIGHT for pan, UP for tilt,
-  towards zoom-in for zoom). Channel and direction are detected automatically. REV flips direction,
-  ✕ disables a role, dead zone is adjustable. Defaults: X = pan, Y = tilt, RZ = zoom; the D-pad always pans/tilts.
-- "Live channels" shows every connected joystick and all its channels moving in real time.
-- Only controllers Android sees as a joystick appear there. If the G20's own sticks are not listed,
-  they go only over the radio link (SBUS), not to Android.
+### Joystick movement
+- Settings → JOYSTICK MOVEMENT has four learnable directions: left, right, up, and down. Tap LEARN,
+  release the stick, then push it in the shown direction. Reverse and clear controls are available for each.
+- Opposite directions can share the same analog axis. The live channel monitor shows whether Android
+  receives the controller axes. The default mapping uses X for left/right and Y for up/down.
+- The G20's built-in sticks only work here if Skydroid exposes them to Android as joystick axes. If the
+  live monitor says no axes are received, the sticks are being sent over the radio link (SBUS) and the
+  app cannot read them without a Skydroid input API or another data connection.
 
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.

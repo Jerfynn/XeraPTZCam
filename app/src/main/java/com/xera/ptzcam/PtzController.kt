@@ -35,9 +35,6 @@ class PtzController(
     @Volatile var padTilt = 0f
     @Volatile var padZoom = 0f
     @Volatile var buttonZoom = 0f
-    /** Movement buttons (Settings → Button mapping). */
-    @Volatile var keyPan = 0f
-    @Volatile var keyTilt = 0f
     @Volatile var swipePan = 0f
     @Volatile var swipeTilt = 0f
     @Volatile var swipeZoom = 0f
@@ -78,8 +75,8 @@ class PtzController(
                 // manual input is limited by the max-speed setting; automatic aiming/tracking
                 // commands are already scaled by their own controllers (scaling them again made
                 // small corrections round to zero, so aiming stalled just short of the target)
-                val pan = q(((stickPan + padPan + swipePan + keyPan).coerceIn(-1f, 1f) * maxSpeed + autoPan).coerceIn(-1f, 1f))
-                val tilt = q(((stickTilt + padTilt + swipeTilt + keyTilt).coerceIn(-1f, 1f) * maxSpeed + autoTilt).coerceIn(-1f, 1f))
+                val pan = q(((stickPan + padPan + swipePan).coerceIn(-1f, 1f) * maxSpeed + autoPan).coerceIn(-1f, 1f))
+                val tilt = q(((stickTilt + padTilt + swipeTilt).coerceIn(-1f, 1f) * maxSpeed + autoTilt).coerceIn(-1f, 1f))
                 val zoom = q((padZoom + buttonZoom + swipeZoom + rockerZoom).coerceIn(-1f, 1f))
                 val now = SystemClock.elapsedRealtime()
 
@@ -123,7 +120,7 @@ class PtzController(
     /** True while the user is steering manually (cancels automatic aiming). */
     val manualActive: Boolean
         get() = stickPan != 0f || stickTilt != 0f || padPan != 0f || padTilt != 0f ||
-            swipePan != 0f || swipeTilt != 0f || keyPan != 0f || keyTilt != 0f
+            swipePan != 0f || swipeTilt != 0f
 
     /** Stops the loop and the camera. */
     fun halt() {
@@ -131,7 +128,6 @@ class PtzController(
         job = null
         stickPan = 0f; stickTilt = 0f; padPan = 0f; padTilt = 0f; padZoom = 0f; buttonZoom = 0f
         swipePan = 0f; swipeTilt = 0f; swipeZoom = 0f; rockerZoom = 0f
-        keyPan = 0f; keyTilt = 0f
         autoPan = 0f; autoTilt = 0f
         val c = client ?: return
         scope.launch(Dispatchers.IO) { runCatching { c.stop() } }

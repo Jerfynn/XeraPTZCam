@@ -23,7 +23,6 @@ import android.provider.MediaStore
 import android.text.InputType
 import android.view.HapticFeedbackConstants
 import android.view.InputDevice
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PixelCopy
 import android.view.SurfaceView
@@ -192,9 +191,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var patrol: PatrolRunner
     private var railTrack: RailButton? = null
     private var patrolStep = ""
-    private var keyMap: MutableMap<Int, CamAction> = mutableMapOf()
-    private val heldKeys = HashMap<Int, CamAction>()
-    private var captureAction: CamAction? = null
     private val clockFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
     private var batteryTick = 0
     private val copyThread = HandlerThread("frame-copy").apply { start() }
@@ -312,8 +308,6 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         stopAutoModes(announce = false)
-        endCapture()
-        releaseAllKeys()
         if (recording) stopRecording(restartStream = false)
         if (wiperOn) setWiper(false)
         ui.removeCallbacks(statsTicker)
@@ -340,13 +334,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars() else releaseAllKeys()   // a key-up may never arrive
+        if (hasFocus) hideSystemBars()
     }
 
     @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun onBackPressed() {
         when {
-            captureAction != null -> endCapture()
             settingsOverlay.visibility == View.VISIBLE -> closeSettings()
             swipePad.selectMode -> cancelSelect()
             presetOverlay.visibility == View.VISIBLE -> closePresets()
@@ -437,7 +430,6 @@ class MainActivity : AppCompatActivity() {
         steps[Step.ONVIF]?.title?.text = if (settings.isSiyi) "GIMBAL" else "ONVIF"
         zoomText.text = "1.0×"
         swipePad.doubleTapEnabled = settings.isSiyi          // tap-to-aim is ZT6 only
-        keyMap = KeyMapping.load(prefs, settings.model)
         tracking.gain = settings.trackGain
     }
 
@@ -2020,8 +2012,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun closeSettings() {
-        endCapture()
-        lastKeyText = null
         endAxisLearn()
         axisMonitor = null
         currentFocus?.let {
@@ -2037,7 +2027,6 @@ class MainActivity : AppCompatActivity() {
 
     /** Builds the side-sheet form for [model] (defaults to the current camera). */
     private fun buildSettingsForm(model: String = settings.model) {
-        captureAction = null                             // a pending button assignment belongs to the old form
         formModel = model
         val s = if (model == settings.model) settings else CamSettings.loadFor(prefs, model)
         val siyiModel = model == CamSettings.MODEL_ZT6
@@ -2192,7 +2181,6 @@ class MainActivity : AppCompatActivity() {
             formDebug = null
         }
 
-        buildMappingSection(model)
         buildAxisSection()
 
         section("ABOUT")
@@ -2387,102 +2375,28 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
 
-            var x = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.PAN] ?: AxisBinding(-1, false)), axisDead)
-            var y = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.TILT] ?: AxisBinding(-1, false)), axisDead)
+            var x = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.RIGHT] ?: AxisBinding(-1, false)), axisDead) -
+                shapeAxis(AxisMapping.value(event, axisMap[AxisRole.LEFT] ?: AxisBinding(-1, false)), axisDead)
+            var y = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.UP] ?: AxisBinding(-1, false)), axisDead) -
+                shapeAxis(AxisMapping.value(event, axisMap[AxisRole.DOWN] ?: AxisBinding(-1, false)), axisDead)
             // D-pad (HAT) always works as a slow pan / tilt
             val hx = event.getAxisValue(MotionEvent.AXIS_HAT_X)
             val hy = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
             if (hx != 0f || hy != 0f) { x = shapeAxis(hx * 0.6f); y = -shapeAxis(hy * 0.6f) }
             ptz.padPan = x
             ptz.padTilt = y
-            ptz.padZoom = shapeAxis(AxisMapping.value(event, axisMap[AxisRole.ZOOM] ?: AxisBinding(-1, false)), axisDead)
+            ptz.padZoom = 0f
             return true
         }
         return super.onGenericMotionEvent(event)
     }
 
-    /**
-     * All hardware keys are handled HERE, before Android's focus navigation sees them.
-     * (Before v3.1.7 the keys went through onKeyDown, which never fires for D-pad / arrow keys while
-     * an on-screen button has focus – the view hierarchy uses them to move the focus instead. That is
-     * why the Skydroid buttons appeared to do nothing.)
-     */
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val id = KeyMapping.idOf(event)
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) showLastKey(event, id)
-        val handled = when (event.action) {
-            KeyEvent.ACTION_DOWN -> handleKeyDown(id, event)
-            KeyEvent.ACTION_UP -> handleKeyUp(id)
-            else -> false
-        }
-        return handled || super.dispatchKeyEvent(event)
-    }
-
-    private fun handleKeyDown(id: Int, event: KeyEvent): Boolean {
-        // 1) Settings → Button mapping is waiting for a button
-        captureAction?.let { action ->
-            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-                endCapture()
-                return true
-            }
-            if (KeyMapping.isMappable(id) && event.repeatCount == 0) assignKey(action, id)
-            else if (id == 0) hudMessage("That button sends no key code – it can't be mapped", error = true)
-            return true
-        }
-        // 2) typing in a settings field: leave keys alone
-        if (settingsOverlay.visibility == View.VISIBLE && currentFocus is EditText) return false
-        // 3) mapped movement
-        val action = keyMap[id] ?: return false
-        if (event.repeatCount == 0) {
-            heldKeys[id] = action
-            updateKeyMovement()
-        }
-        return true
-    }
-
-    private fun handleKeyUp(id: Int): Boolean {
-        if (heldKeys.remove(id) != null) {
-            updateKeyMovement()
-            return true
-        }
-        return captureAction != null
-    }
-
-    /** Pan / tilt from all held movement buttons (left + right cancel out). */
-    private fun updateKeyMovement() {
-        var pan = 0
-        var tilt = 0
-        for (a in heldKeys.values.toSet()) { pan += a.pan; tilt += a.tilt }
-        ptz.keyPan = pan.coerceIn(-1, 1) * KEY_SPEED
-        ptz.keyTilt = tilt.coerceIn(-1, 1) * KEY_SPEED
-    }
-
-    private fun releaseAllKeys() {
-        heldKeys.clear()
-        ptz.keyPan = 0f
-        ptz.keyTilt = 0f
-    }
-
-    private var lastKeyText: TextView? = null
-
-    private fun showLastKey(e: KeyEvent, id: Int) {
-        val tv = lastKeyText ?: return
-        if (settingsOverlay.visibility != View.VISIBLE) return
-        val mapped = keyMap[id]?.let { " → ${it.label}" } ?: ""
-        tv.text = String.format(
-            Locale.US, "Last button: %s  (key %d, scan %d)%s\n%s",
-            if (id == 0) "UNKNOWN" else KeyMapping.keyName(id), e.keyCode, e.scanCode, mapped,
-            e.device?.name ?: "unknown device",
-        )
-    }
-
-    // ---------------- Settings → Joystick channels (pan / tilt / zoom)
+    // ---------------- Settings → four joystick movement directions
 
     private fun buildAxisSection() {
-        section("JOYSTICK CHANNELS")
-        label("Choose which joystick channel moves the gimbal. Tap LEARN, then move that stick. " +
-            "Works with any controller Android sees as a joystick (USB / Bluetooth gamepad, USB RC " +
-            "transmitter in joystick mode, or ground-station sticks reported to Android). Saved instantly.")
+        section("JOYSTICK MOVEMENT")
+        label("Map the four movement directions. Tap LEARN, then push the stick in the indicated " +
+            "direction. The controller must expose its stick axes to Android. Mappings save instantly.")
         axisLabels.clear()
         for (role in AxisRole.values()) {
             val row = LinearLayout(this).apply {
@@ -2568,7 +2482,7 @@ class MainActivity : AppCompatActivity() {
             axisMap = AxisMapping.load(prefs)
             axisDead = AxisMapping.deadzone(prefs)
             refreshAxisLabels()
-            hudMessage("Joystick channels reset (left stick X / Y, RZ zoom)")
+            hudMessage("Joystick directions reset (left stick X / Y)")
         }
         settingsContent.addView(reset, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()
@@ -2582,8 +2496,8 @@ class MainActivity : AppCompatActivity() {
             .filter { (it.sources and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK }
             .map { d -> "${d.name}  (${AxisMapping.joystickAxes(d).size} channels)" }
         return if (names.isEmpty())
-            "No joystick connected.\nIf the G20 sticks are not listed here, the controller sends\n" +
-                "them only over the radio link (SBUS), not to Android."
+            "No joystick axes received by Android. The G20's built-in sticks may be routed\n" +
+                "over the radio link (SBUS) instead of being exposed to apps."
         else "Connected:\n" + names.joinToString("\n") + "\n\nMove a stick…"
     }
 
@@ -2593,13 +2507,13 @@ class MainActivity : AppCompatActivity() {
         val now = SystemClock.elapsedRealtime()
         if (now - monitorUpdatedMs < 80) return
         monitorUpdatedMs = now
-        val used = axisMap.entries.associate { it.value.axis to it.key }
+        val used = axisMap.entries.filter { it.value.used }.groupBy({ it.value.axis }, { it.key })
         val sb = StringBuilder(lastJoyDevice).append('\n')
         for (r in AxisMapping.joystickAxes(e.device)) {
             val v = e.getAxisValue(r.axis)
             val frac = if (r.max > r.min) ((v - r.min) / (r.max - r.min)).coerceIn(0f, 1f) else 0.5f
             val bar = CharArray(12) { if (it < (frac * 12).roundToInt()) '█' else '·' }
-            val role = used[r.axis]?.let { "  ← ${it.name}" } ?: ""
+            val role = used[r.axis]?.joinToString(prefix = "  ← ") { it.name } ?: ""
             sb.append(String.format(Locale.US, "%-9s %+6.2f %s%s\n", AxisMapping.axisName(r.axis), v, String(bar), role))
         }
         tv.text = sb.toString().trimEnd()
@@ -2650,8 +2564,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun assignAxis(role: AxisRole, b: AxisBinding) {
-        // one channel drives one role
-        for (r in AxisRole.values()) if (r != role && axisMap[r]?.axis == b.axis) axisMap[r] = AxisBinding(-1, false)
+        // Opposite directions intentionally share an axis (for example, X drives left and right).
         axisMap[role] = b
         endAxisLearn()
         saveAxisMap()
@@ -2669,132 +2582,6 @@ class MainActivity : AppCompatActivity() {
         refreshAxisLabels()
     }
 
-    // ---------------- Settings → Button mapping
-
-    private var formKeyMap: MutableMap<Int, CamAction> = mutableMapOf()
-    private val mappingLabels = LinkedHashMap<CamAction, TextView>()
-
-    private fun buildMappingSection(model: String) {
-        section("BUTTON MAPPING")
-        label("Gimbal movement buttons. Tap SET, then press the G20 / gamepad button. " +
-            "Held = moves, released = stops. Saved instantly, used for both cameras.")
-        formKeyMap = KeyMapping.load(prefs, model)
-        mappingLabels.clear()
-        for (action in CamAction.values()) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
-            }
-            row.addView(TextView(this).apply {
-                text = action.label
-                typeface = fontSemi
-                textSize = 14f
-                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
-            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            val key = TextView(this).apply {
-                typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
-                textSize = 11f
-                gravity = android.view.Gravity.CENTER
-                setPadding((8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt())
-                setBackgroundResource(R.drawable.glass_pill)
-            }
-            row.addView(key, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = (8 * dp).toInt() })
-            row.addView(smallButton("SET") { beginCapture(action) })
-            row.addView(smallButton("✕") {
-                formKeyMap.entries.removeAll { it.value == action }
-                saveFormKeyMap()
-            }, LinearLayout.LayoutParams((40 * dp).toInt(), (34 * dp).toInt()).apply {
-                marginStart = (6 * dp).toInt()
-            })
-            mappingLabels[action] = key
-            settingsContent.addView(row)
-        }
-        val reset = smallButton("RESET TO DEFAULTS") {
-            KeyMapping.reset(prefs, formModel)
-            formKeyMap = KeyMapping.defaults().toMutableMap()
-            keyMap = formKeyMap.toMutableMap()
-            refreshMappingLabels()
-            hudMessage("Button mapping reset (D-pad arrows)")
-        }
-        settingsContent.addView(reset, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, (40 * dp).toInt()
-        ).apply { topMargin = (8 * dp).toInt() })
-        lastKeyText = TextView(this).apply {
-            typeface = ResourcesCompat.getFont(this@MainActivity, R.font.jetbrains_mono)
-            textSize = 11f
-            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
-            setBackgroundResource(R.drawable.field_bg)
-            setPadding((10 * dp).toInt(), (8 * dp).toInt(), (10 * dp).toInt(), (8 * dp).toInt())
-            text = "Press any G20 button – it will show here.\nIf nothing appears, that button is not sent to Android."
-        }
-        settingsContent.addView(lastKeyText, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = (8 * dp).toInt() })
-        refreshMappingLabels()
-    }
-
-    private fun smallButton(text: String, onClick: () -> Unit) = Button(this).apply {
-        this.text = text
-        typeface = fontBold
-        textSize = 12f
-        letterSpacing = 0.06f
-        minWidth = 0
-        minHeight = 0
-        minimumWidth = 0
-        minimumHeight = 0
-        setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), 0)
-        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_main))
-        setBackgroundResource(R.drawable.btn_secondary)
-        stateListAnimator = null
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (34 * dp).toInt())
-        setOnClickListener { it.tick(); onClick() }
-    }
-
-    private fun refreshMappingLabels() {
-        val accent = ContextCompat.getColor(this, R.color.accent)
-        val dim = ContextCompat.getColor(this, R.color.text_dim)
-        for ((action, tv) in mappingLabels) {
-            if (action == captureAction) {
-                tv.text = "PRESS A BUTTON…"
-                tv.setTextColor(accent)
-                continue
-            }
-            val code = formKeyMap.entries.firstOrNull { it.value == action }?.key
-            tv.text = code?.let { KeyMapping.keyName(it) } ?: "—"
-            tv.setTextColor(if (code != null) accent else dim)
-        }
-    }
-
-    private fun beginCapture(action: CamAction) {
-        currentFocus?.clearFocus()
-        captureAction = action
-        refreshMappingLabels()
-        hudMessage("Press the button for “${action.label}” (BACK cancels)")
-    }
-
-    private fun endCapture() {
-        captureAction = null
-        if (mappingLabels.isNotEmpty()) refreshMappingLabels()
-    }
-
-    private fun assignKey(action: CamAction, keyCode: Int) {
-        formKeyMap.entries.removeAll { it.value == action }    // one button per action
-        val replaced = formKeyMap.put(keyCode, action)          // a button triggers one action
-        captureAction = null
-        saveFormKeyMap()
-        val note = if (replaced != null && replaced != action) " (was ${replaced.label})" else ""
-        hudMessage("${KeyMapping.keyName(keyCode)} → ${action.label}$note")
-    }
-
-    private fun saveFormKeyMap() {
-        KeyMapping.save(prefs, formModel, formKeyMap)
-        keyMap = formKeyMap.toMutableMap()
-        refreshMappingLabels()
-    }
-
     // ------------------------------------------------------------------ misc
 
     private fun hideSystemBars() {
@@ -2806,7 +2593,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val KEY_SPEED = 0.5f         // gimbal speed while a movement button is held
         private const val HOME_PRESET = "10"
         private const val WIPER_RUN_MS = 6000L
         private const val MIN_VIDEO_BYTES = 50_000L
