@@ -643,7 +643,10 @@ class MainActivity : AppCompatActivity() {
                     ptz.client = ok.first
                     setControlBadge(true)
                     onvifRtsp = ok.second
-                    setStep(Step.ONVIF, StepState.OK, "PTZ ready")
+                    setStep(
+                        Step.ONVIF, StepState.OK,
+                        if (ok.first.cameraClockSynced) "PTZ ready · G20 time synced" else "PTZ ready · camera time unchanged",
+                    )
                     if (!isLive) setStep(Step.VIDEO, StepState.ACTIVE, "Opening stream…")
                     if (!playerStarted) playStream()
                     readNightState(ok.first)

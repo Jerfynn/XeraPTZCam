@@ -135,5 +135,7 @@ SHJ-TW10: VLC asks for the camera username / password.
 - In Settings → CONTROL, learn the four movement directions and the zoom slider from the live RC
   channels. Use REMOTE BUTTONS to assign recording, capture, wipe, IR Auto, and home to channel
   switches or Android key buttons.
+- The SHJ camera's embedded date/time watermark is synchronized to the G20's date, time, and timezone
+  when the camera connects over ONVIF. Connection status reports if the camera accepts the sync.
 - If recording reports "not available", change libvlc-all in app/build.gradle.kts to 3.6.0 and rebuild,
   or record on the camera's SD card (Storage menu).

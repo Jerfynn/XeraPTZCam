@@ -57,6 +57,10 @@ class OnvifClient(
     private var clockOffsetMs = 0L
     @Volatile private var nonceCount = 0
 
+    /** True when the camera accepted the G20's system date, time and fixed local timezone. */
+    @Volatile var cameraClockSynced: Boolean = false
+        private set
+
     /** Auxiliary commands the camera reports (e.g. "tt:Wiper|On"). Filled by connect(). */
     var auxCommands: List<String> = emptyList()
         private set
@@ -239,26 +243,60 @@ class OnvifClient(
 
     /** WS-Security timestamps must match the camera clock, so measure the offset first. */
     private fun syncClock() {
-        try {
+        val measuredOffset = runCatching {
             val r = String(
                 request(deviceUrl, { envelope("<tds:GetSystemDateAndTime xmlns:tds=\"$NS_DEVICE\"/>", secure = false) }),
                 Charsets.UTF_8
             )
             val utc = r.substringAfter("UTCDateTime", "")
-            if (utc.isEmpty()) return
             fun v(tag: String) = Regex("<(?:\\w+:)?$tag>(\\d+)<").find(utc)?.groupValues?.get(1)?.toInt()
-            val year = v("Year") ?: return
-            val month = v("Month") ?: return
-            val day = v("Day") ?: return
-            val hour = v("Hour") ?: return
-            val minute = v("Minute") ?: return
-            val second = v("Second") ?: return
+                ?: throw OnvifException("camera returned no system time")
             val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
             cal.clear()
-            cal.set(year, month - 1, day, hour, minute, second)
-            clockOffsetMs = cal.timeInMillis - System.currentTimeMillis()
+            cal.set(v("Year"), v("Month") - 1, v("Day"), v("Hour"), v("Minute"), v("Second"))
+            cal.timeInMillis - System.currentTimeMillis()
+        }
+        measuredOffset.getOrNull()?.let { clockOffsetMs = it }
+
+        cameraClockSynced = try {
+            setSystemDateAndTimeFromDevice()
+            clockOffsetMs = 0L
+            true
         } catch (_: Exception) {
-            // not fatal
+            // Some cameras expose ONVIF reads but reject clock changes; keep streaming/control working.
+            false
+        }
+    }
+
+    /** Set the camera's embedded OSD clock to the G20's clock and current local timezone. */
+    private fun setSystemDateAndTimeFromDevice() {
+        val now = System.currentTimeMillis()
+        val utc = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { timeInMillis = now }
+        val zone = TimeZone.getDefault()
+        val abbreviation = SimpleDateFormat("z", Locale.US).apply { timeZone = zone }
+            .format(Date(now)).filter { it.isLetter() }.takeIf { it.length >= 3 } ?: "UTC"
+        val offsetMinutes = zone.getOffset(now) / 60_000
+        val posixSign = if (offsetMinutes >= 0) "-" else "+" // POSIX TZ signs are opposite UTC offsets.
+        val absoluteMinutes = kotlin.math.abs(offsetMinutes)
+        val hours = absoluteMinutes / 60
+        val minutes = absoluteMinutes % 60
+        val tz = "$abbreviation$posixSign$hours" + if (minutes == 0) "" else ":${minutes.toString().padStart(2, '0')}"
+
+        val body = "<tds:SetSystemDateAndTime xmlns:tds=\"$NS_DEVICE\" xmlns:tt=\"$NS_SCHEMA\">" +
+            "<tds:DateTimeType>Manual</tds:DateTimeType>" +
+            "<tds:DaylightSavings>false</tds:DaylightSavings>" +
+            "<tds:TimeZone><tt:TZ>${esc(tz)}</tt:TZ></tds:TimeZone>" +
+            "<tds:UTCDateTime><tt:Time>" +
+            "<tt:Hour>${utc.get(Calendar.HOUR_OF_DAY)}</tt:Hour>" +
+            "<tt:Minute>${utc.get(Calendar.MINUTE)}</tt:Minute>" +
+            "<tt:Second>${utc.get(Calendar.SECOND)}</tt:Second></tt:Time><tt:Date>" +
+            "<tt:Year>${utc.get(Calendar.YEAR)}</tt:Year>" +
+            "<tt:Month>${utc.get(Calendar.MONTH) + 1}</tt:Month>" +
+            "<tt:Day>${utc.get(Calendar.DAY_OF_MONTH)}</tt:Day></tt:Date></tds:UTCDateTime>" +
+            "</tds:SetSystemDateAndTime>"
+        val response = soap(deviceUrl, body)
+        if (Regex("<(?:\\w+:)?Fault(?:\\s|>)").containsMatchIn(response)) {
+            throw OnvifException("camera rejected the time synchronization request")
         }
     }
 

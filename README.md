@@ -109,6 +109,8 @@ Choose the camera in Settings → CAMERA MODEL. Each model keeps its own IP / po
   the direction is backwards.
 - Under REMOTE BUTTONS, learn Recording, Capture photo, Wipe, IR Auto, and Home by pressing each G20
   button or switch. The app learns either RC channel switches or Android key buttons.
+- When an SHJ camera connects over ONVIF, XeraCAM synchronizes its embedded video date/time watermark
+  to the G20 clock and timezone. The ONVIF status shows whether the camera accepted the sync.
 
 ### Common
 - Swipe = pan/tilt, pinch or ZOOM rocker = zoom. Recording → Movies/XeraCAM, photos → Pictures/XeraCAM.
